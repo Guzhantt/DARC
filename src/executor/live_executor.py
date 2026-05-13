@@ -1,19 +1,32 @@
 """Live executor: polls one symbol + timeframe, acts on signal at bar close.
 
 By default uses BINANCE FUTURES TESTNET. Set USE_TESTNET=false to trade real.
+Supports both price-only and enhanced (OI + on-chain) strategies.
 """
 from __future__ import annotations
 
 import time
 
+import numpy as np
 import pandas as pd
 
 from src.config import Config
 from src.data.data_loader import TF_MS
+from src.data.enhanced_loader import _to_raw_symbol, _TF_TO_OI_PERIOD
+from src.data.oi_data import fetch_all_derivatives_data, fetch_funding_rate_history
+from src.data.onchain_data import (
+    compute_exchange_flow_proxy,
+    compute_funding_signal,
+    compute_oi_momentum,
+    compute_whale_score,
+)
 from src.exchange.binance_client import BinanceFutures
 from src.risk.risk_manager import RiskManager
 from src.strategies.base import Strategy
 from src.utils.logger import get_logger
+
+# Strategies that need enhanced data
+_ENHANCED_STRATEGIES = {"oi_composite"}
 
 
 class LiveExecutor:
@@ -23,6 +36,7 @@ class LiveExecutor:
         self.strategy = strategy
         self.symbol = symbol
         self.timeframe = timeframe
+        self.use_enhanced = strategy.name in _ENHANCED_STRATEGIES
         self.log = get_logger(f"live.{symbol}", cfg.logs_dir / "live.log")
         self.risk = RiskManager(
             risk_per_trade=cfg.risk_per_trade,
@@ -33,7 +47,63 @@ class LiveExecutor:
         self._last_processed_ts: pd.Timestamp | None = None
 
     def _fetch_recent(self, limit: int = 500) -> pd.DataFrame:
-        return self.client.fetch_ohlcv(self.symbol, self.timeframe, limit=limit)
+        df = self.client.fetch_ohlcv(self.symbol, self.timeframe, limit=limit)
+        if not self.use_enhanced or df.empty:
+            return df
+        # Enhance with OI + derivatives data
+        return self._enrich_with_derivatives(df)
+
+    def _enrich_with_derivatives(self, ohlcv: pd.DataFrame) -> pd.DataFrame:
+        """Fetch live OI/derivatives data and merge into OHLCV."""
+        raw_sym = _to_raw_symbol(self.symbol)
+        oi_period = _TF_TO_OI_PERIOD.get(self.timeframe, "1h")
+        try:
+            deriv = fetch_all_derivatives_data(raw_sym, oi_period, limit=200)
+        except Exception as e:
+            self.log.warning("Failed to fetch derivatives data: %s", e)
+            deriv = pd.DataFrame()
+        try:
+            funding = fetch_funding_rate_history(raw_sym, limit=100)
+        except Exception as e:
+            self.log.warning("Failed to fetch funding data: %s", e)
+            funding = pd.DataFrame()
+
+        df = ohlcv.copy()
+        if df["ts"].dt.tz is None:
+            df["ts"] = df["ts"].dt.tz_localize("UTC")
+
+        if not deriv.empty and "ts" in deriv.columns:
+            if deriv["ts"].dt.tz is None:
+                deriv["ts"] = deriv["ts"].dt.tz_localize("UTC")
+            deriv_cols = [c for c in deriv.columns if c != "ts" or c == "ts"]
+            df = pd.merge_asof(
+                df.sort_values("ts"),
+                deriv.sort_values("ts"),
+                on="ts",
+                direction="backward",
+            )
+
+        if not funding.empty and "ts" in funding.columns:
+            if funding["ts"].dt.tz is None:
+                funding["ts"] = funding["ts"].dt.tz_localize("UTC")
+            funding["funding_signal"] = compute_funding_signal(funding).values
+            df = pd.merge_asof(
+                df.sort_values("ts"),
+                funding[["ts", "funding_rate", "funding_signal"]].sort_values("ts"),
+                on="ts",
+                direction="backward",
+            )
+
+        df["whale_score"] = compute_whale_score(df).values
+        df["flow_proxy"] = compute_exchange_flow_proxy(df).values
+        df["oi_momentum"] = compute_oi_momentum(df).values
+
+        for col in ["oi", "ls_ratio", "taker_ratio", "funding_rate", "funding_signal",
+                    "whale_score", "flow_proxy", "oi_momentum"]:
+            if col not in df.columns:
+                df[col] = np.nan
+
+        return df.sort_values("ts").reset_index(drop=True)
 
     def _current_side(self) -> str:
         pos = self.client.fetch_position(self.symbol)
