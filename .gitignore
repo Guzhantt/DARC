@@ -19,3 +19,14 @@ darc-docs/.docusaurus
 darc-docs/build
 darc-docs/static/api
 darc-js/dist
+
+
+# Binance futures bot
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+data/cache/
+logs/
+*.log
