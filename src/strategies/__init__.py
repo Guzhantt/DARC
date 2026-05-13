@@ -3,12 +3,14 @@ from .ma_cross import MACrossStrategy
 from .rsi import RSIStrategy
 from .donchian import DonchianStrategy
 from .oi_composite import OICompositeStrategy
+from .smart_reversion import SmartReversionStrategy
 
 REGISTRY = {
     "ma_cross": MACrossStrategy,
     "rsi": RSIStrategy,
     "donchian": DonchianStrategy,
     "oi_composite": OICompositeStrategy,
+    "smart_reversion": SmartReversionStrategy,
 }
 
 
