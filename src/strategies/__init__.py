@@ -4,6 +4,7 @@ from .rsi import RSIStrategy
 from .donchian import DonchianStrategy
 from .oi_composite import OICompositeStrategy
 from .smart_reversion import SmartReversionStrategy
+from .alpha_scanner import AlphaScannerStrategy
 
 REGISTRY = {
     "ma_cross": MACrossStrategy,
@@ -11,6 +12,7 @@ REGISTRY = {
     "donchian": DonchianStrategy,
     "oi_composite": OICompositeStrategy,
     "smart_reversion": SmartReversionStrategy,
+    "alpha_scanner": AlphaScannerStrategy,
 }
 
 
