@@ -5,6 +5,7 @@ from .donchian import DonchianStrategy
 from .oi_composite import OICompositeStrategy
 from .smart_reversion import SmartReversionStrategy
 from .alpha_scanner import AlphaScannerStrategy
+from .trend_filter import TrendFilterStrategy
 
 REGISTRY = {
     "ma_cross": MACrossStrategy,
@@ -13,6 +14,7 @@ REGISTRY = {
     "oi_composite": OICompositeStrategy,
     "smart_reversion": SmartReversionStrategy,
     "alpha_scanner": AlphaScannerStrategy,
+    "trend_filter": TrendFilterStrategy,
 }
 
 
