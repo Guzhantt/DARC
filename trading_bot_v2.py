@@ -751,6 +751,287 @@ def apply_whale_filter(signal: dict, whale_data: Optional[dict],
 
 
 # ═══════════════════════════════════════════════════
+# P1-1: 市场状态识别 + 策略自动切换
+# ═══════════════════════════════════════════════════
+
+def compute_adx(ohlcv: list, period: int = 14) -> float:
+    """计算最新 ADX 值 (趋势强度指标). 0-100, >25=有趋势, <20=震荡."""
+    if len(ohlcv) < period * 2 + 1:
+        return 20.0  # 默认中性
+    highs = np.array([float(b[2]) for b in ohlcv])
+    lows = np.array([float(b[3]) for b in ohlcv])
+    closes = np.array([float(b[4]) for b in ohlcv])
+    n = len(highs)
+    tr = np.maximum(highs[1:] - lows[1:],
+                    np.maximum(np.abs(highs[1:] - closes[:-1]),
+                               np.abs(lows[1:] - closes[:-1])))
+    up = highs[1:] - highs[:-1]
+    dn = lows[:-1] - lows[1:]
+    plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
+    minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    atr = np.mean(tr[-period:])
+    if atr <= 0:
+        return 20.0
+    plus_di = 100 * np.mean(plus_dm[-period:]) / atr
+    minus_di = 100 * np.mean(minus_dm[-period:]) / atr
+    if (plus_di + minus_di) == 0:
+        return 20.0
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    return float(dx)
+
+
+def compute_bollinger_width(ohlcv: list, period: int = 20) -> float:
+    """布林带宽度 (归一化). 越小=越震荡, 越大=越趋势."""
+    if len(ohlcv) < period:
+        return 0.05
+    closes = np.array([float(b[4]) for b in ohlcv[-period:]])
+    ma = np.mean(closes)
+    std = np.std(closes)
+    if ma <= 0:
+        return 0.05
+    return float(std / ma)
+
+
+class MarketState:
+    """市场状态识别器.
+    
+    三种状态:
+    - TRENDING: ADX > 25, BB width 扩大 → 用 trend_filter 逻辑
+    - RANGING:  ADX < 20, BB width 收窄 → 用 smart_reversion (高胜率)
+    - VOLATILE: 24h波动 > 5% → 用事件驱动 (极端反转)
+    """
+    TRENDING = "trending"
+    RANGING = "ranging"
+    VOLATILE = "volatile"
+    
+    def __init__(self):
+        self.current_state = self.RANGING
+        self.state_since = datetime.now(TZ_UTC8)
+    
+    def detect(self, ohlcv: list, ticker: dict) -> str:
+        """根据当前 K 线数据判断市场状态."""
+        adx = compute_adx(ohlcv, 14)
+        bb_width = compute_bollinger_width(ohlcv, 20)
+        change_24h = abs(float(ticker.get("percentage", 0) or 0))
+        
+        # 极端波动优先
+        if change_24h > 5:
+            new_state = self.VOLATILE
+        elif adx > 25 and bb_width > 0.03:
+            new_state = self.TRENDING
+        elif adx < 20 or bb_width < 0.02:
+            new_state = self.RANGING
+        else:
+            new_state = self.current_state  # 保持不变 (避免频繁切换)
+        
+        if new_state != self.current_state:
+            log(f"  市场状态切换: {self.current_state} → {new_state} "
+                f"(ADX={adx:.1f}, BBW={bb_width:.4f}, 24h={change_24h:.1f}%)")
+            self.current_state = new_state
+            self.state_since = datetime.now(TZ_UTC8)
+        
+        return self.current_state
+    
+    def select_signal(self, ohlcv: list, ticker: dict, funding_rate: float) -> Optional[dict]:
+        """根据当前市场状态选择适配的策略产生信号.
+        
+        TRENDING → MA60 回踩 (入场条件宽松版)
+        RANGING  → smart_reversion (RSI 极端反转, 高胜率)
+        VOLATILE → 事件驱动 (暴跌反弹 / 暴涨做空 / 极端费率)
+        """
+        state = self.detect(ohlcv, ticker)
+        
+        if state == self.VOLATILE:
+            # 极端波动: 优先事件信号
+            sig = detect_event_signal(ticker, funding_rate)
+            if sig:
+                sig["reason"] = f"[VOLATILE] {sig['reason']}"
+                return sig
+            # fallback: RSI 极端也行
+            sig = detect_smart_reversion(ohlcv)
+            if sig:
+                sig["reason"] = f"[VOLATILE→RSI] {sig['reason']}"
+            return sig
+        
+        elif state == self.RANGING:
+            # 震荡市: smart_reversion 最适合
+            sig = detect_smart_reversion(ohlcv)
+            if sig:
+                sig["reason"] = f"[RANGING] {sig['reason']}"
+            return sig
+        
+        elif state == self.TRENDING:
+            # 趋势市: MA60 回踩 (简化版 trend_filter)
+            sig = detect_trend_pullback(ohlcv)
+            if sig:
+                sig["reason"] = f"[TRENDING] {sig['reason']}"
+                return sig
+            # 也检测事件 (趋势中的极端费率更有杀伤力)
+            sig = detect_event_signal(ticker, funding_rate)
+            if sig:
+                sig["reason"] = f"[TRENDING+EVENT] {sig['reason']}"
+            return sig
+        
+        return None
+
+
+def detect_trend_pullback(ohlcv: list, ma_period: int = 50, atr_mult: float = 1.5) -> Optional[dict]:
+    """趋势回踩入场 (简化版 trend_filter, 适合实盘).
+    
+    条件 (只做多):
+    1. 价格在 MA50 上方 (确认上升趋势)
+    2. 回踩到 MA50 ±1.5x ATR 以内
+    3. 出现阳线 (止跌确认)
+    4. 量能 > 5 日均量 1.2x
+    """
+    if len(ohlcv) < ma_period + 10:
+        return None
+    
+    closes = np.array([float(b[4]) for b in ohlcv])
+    opens = np.array([float(b[1]) for b in ohlcv])
+    volumes = np.array([float(b[5]) for b in ohlcv])
+    
+    ma = np.mean(closes[-ma_period:])
+    atr = compute_atr(ohlcv, 14)
+    if atr <= 0:
+        return None
+    
+    c_prev = closes[-2]
+    o_prev = opens[-2]
+    vol_prev = volumes[-2]
+    vol_ma5 = np.mean(volumes[-7:-2])
+    
+    # 1. 价格在 MA 上方附近 (回踩区)
+    zone = atr_mult * atr
+    in_zone = abs(c_prev - ma) <= zone
+    above_ma = c_prev > ma * 0.99
+    
+    # 2. 阳线
+    is_bull = c_prev > o_prev
+    
+    # 3. 量能
+    vol_ok = vol_prev > vol_ma5 * 1.2
+    
+    # 4. 趋势方向 (MA 上升中)
+    ma_prev = np.mean(closes[-(ma_period+5):-5])
+    ma_rising = ma > ma_prev
+    
+    if in_zone and above_ma and is_bull and vol_ok and ma_rising:
+        return {
+            "direction": "long",
+            "reason": f"MA{ma_period}回踩+阳线+放量 (ma={ma:.0f}, atr={atr:.0f})",
+            "sl_pct": atr * 2.5 / c_prev,  # 2.5x ATR 止损
+            "tp_pct": atr * 4.0 / c_prev,  # 4x ATR 止盈
+        }
+    
+    return None
+
+
+# ═══════════════════════════════════════════════════
+# P1-2: 资金费率套利模块 (Delta-Neutral Funding Arbitrage)
+# ═══════════════════════════════════════════════════
+
+class FundingArbitrage:
+    """资金费率套利: 极端正费率时做空永续 + 对冲, 吃费率.
+    
+    原理:
+    - 当资金费率 > 0.05% (年化 ~55%): 做多的人每 8h 付费给做空的人
+    - 我们做空永续合约, 赚资金费率
+    - 对冲: 不对冲 (承担小方向性风险) 或者 买入等额现货对冲 (delta-neutral)
+    
+    本模块的策略:
+    - 不做完全 delta-neutral (需要现货账户, 复杂), 而是:
+    - 选极端费率币 (>0.1%), 短时间做空赚 1-3 期费率, 然后平仓
+    - 用 RSI 确保不在超跌时做空 (避免逆向大涨)
+    - 本质是 "方向性资金费率交易" 而非纯套利
+    
+    风控:
+    - 只在费率 > 0.08% 时才触发 (年化 ~87%)
+    - 止损 3% (防止方向性亏损)
+    - 最多占用 1 个持仓槽
+    - 持仓时间限制: 最多 24h (3 个费率周期)
+    """
+    
+    def __init__(self, state: State, exchange: ccxt.binanceusdm):
+        self.state = state
+        self.exchange = exchange
+        self.enabled = os.getenv("ENABLE_FUNDING_ARB", "true").lower() in ("true", "1", "yes")
+        self.min_funding_rate = float(os.getenv("MIN_FUNDING_RATE", "0.08"))  # 0.08%
+        self.max_hold_hours = int(os.getenv("FUNDING_MAX_HOLD_HOURS", "24"))
+        self.funding_sl_pct = float(os.getenv("FUNDING_SL_PCT", "0.03"))  # 3% 止损
+    
+    def scan_opportunities(self, funding_rates: dict, tickers: dict) -> list[dict]:
+        """扫描高费率套利机会."""
+        if not self.enabled:
+            return []
+        
+        opportunities = []
+        for symbol_raw, rate in funding_rates.items():
+            # 正费率极端 → 做空赚费率
+            if rate >= self.min_funding_rate:
+                # 确认有对应的 ticker
+                ccxt_sym = None
+                for s in tickers:
+                    if symbol_raw in s.replace("/", "").replace(":USDT", ""):
+                        ccxt_sym = s
+                        break
+                if not ccxt_sym:
+                    continue
+                
+                vol = float(tickers[ccxt_sym].get("quoteVolume") or 0)
+                if vol < 5_000_000:  # 最少 500万 USD 成交量
+                    continue
+                
+                opportunities.append({
+                    "symbol": ccxt_sym,
+                    "symbol_raw": symbol_raw,
+                    "direction": "short",
+                    "funding_rate": rate,
+                    "reason": f"资金费率套利: 费率{rate:.4f}% (年化{rate*3*365:.0f}%) → 做空吃费率",
+                    "sl_pct": self.funding_sl_pct,
+                    "tp_pct": rate * 3 / 100,  # 目标吃 3 个费率周期
+                    "is_funding_arb": True,
+                    "max_hold_until": (datetime.now(TZ_UTC8) + timedelta(hours=self.max_hold_hours)).isoformat(),
+                })
+            
+            # 负费率极端 → 做多赚费率
+            elif rate <= -self.min_funding_rate:
+                ccxt_sym = None
+                for s in tickers:
+                    if symbol_raw in s.replace("/", "").replace(":USDT", ""):
+                        ccxt_sym = s
+                        break
+                if not ccxt_sym:
+                    continue
+                
+                vol = float(tickers[ccxt_sym].get("quoteVolume") or 0)
+                if vol < 5_000_000:
+                    continue
+                
+                opportunities.append({
+                    "symbol": ccxt_sym,
+                    "symbol_raw": symbol_raw,
+                    "direction": "long",
+                    "funding_rate": rate,
+                    "reason": f"资金费率套利: 费率{rate:.4f}% (年化{abs(rate)*3*365:.0f}%) → 做多吃费率",
+                    "sl_pct": self.funding_sl_pct,
+                    "tp_pct": abs(rate) * 3 / 100,
+                    "is_funding_arb": True,
+                    "max_hold_until": (datetime.now(TZ_UTC8) + timedelta(hours=self.max_hold_hours)).isoformat(),
+                })
+        
+        # 按费率绝对值排序 (最极端的优先)
+        opportunities.sort(key=lambda x: -abs(x["funding_rate"]))
+        return opportunities[:3]  # 最多返回 3 个机会
+    
+    def check_expiry(self, pos: dict) -> bool:
+        """检查资金费率仓位是否到期 (超过 max_hold_hours)."""
+        opened_at = datetime.fromisoformat(pos["opened_at"])
+        elapsed = datetime.now(TZ_UTC8) - opened_at
+        return elapsed > timedelta(hours=self.max_hold_hours)
+
+
+# ═══════════════════════════════════════════════════
 # 仓位管理 (动态止损 + 跟踪止盈)
 # ═══════════════════════════════════════════════════
 
@@ -885,6 +1166,8 @@ class TradingBot:
         self.reconciler = Reconciler(self.exchange, self.state)
         self.heartbeat = HeartbeatMonitor(self.state)
         self.pos_mgr = PositionManager(self.state, self.exchange)
+        self.market_state = MarketState()
+        self.funding_arb = FundingArbitrage(self.state, self.exchange)
         self.consecutive_failures = 0
 
     def _create_exchange(self) -> ccxt.binanceusdm:
@@ -1125,16 +1408,15 @@ class TradingBot:
             if current_price <= 0:
                 continue
 
-            # 检测信号 (优先级: 事件 > RSI 反转)
-            signal = detect_event_signal(ticker, funding)
-            if not signal:
-                try:
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
-                    if not ohlcv or len(ohlcv) < 50:
-                        continue
-                    signal = detect_smart_reversion(ohlcv)
-                except Exception:
-                    continue
+            # 检测信号 — P1 自适应策略切换
+            signal = None
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
+                if ohlcv and len(ohlcv) >= 50:
+                    # 市场状态自动选择最合适的策略
+                    signal = self.market_state.select_signal(ohlcv, ticker, funding)
+            except Exception:
+                continue
 
             if not signal:
                 continue
@@ -1164,6 +1446,58 @@ class TradingBot:
             signals_found += 1
             open_count = len(self.state.get_all_positions())
             time.sleep(2)  # 避免连续下单触发限流
+
+        # 6. P1-2: 资金费率套利扫描
+        if open_count < MAX_OPEN_POSITIONS and not halted:
+            arb_opps = self.funding_arb.scan_opportunities(funding_rates, tickers)
+            for arb in arb_opps:
+                if open_count >= MAX_OPEN_POSITIONS:
+                    break
+                sym = arb["symbol"]
+                if self.state.get_position(sym):
+                    continue
+                if self.state.is_in_cooldown(sym):
+                    continue
+                
+                # 鲸鱼过滤
+                raw_sym = arb["symbol_raw"]
+                whale_data = fetch_whale_data(raw_sym)
+                change_pct = float(tickers.get(sym, {}).get("percentage", 0) or 0) / 100
+                filtered, whale_reason = apply_whale_filter(
+                    arb, whale_data, change_pct, mode=WHALE_FILTER_MODE
+                )
+                if filtered is None:
+                    log(f"  费率套利 {sym} 被鲸鱼否决: {whale_reason}")
+                    continue
+                
+                current_price = float(tickers[sym].get("last") or 0)
+                if current_price <= 0:
+                    continue
+                
+                try:
+                    ohlcv = self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=30)
+                    atr = compute_atr(ohlcv, 14)
+                except Exception:
+                    atr = current_price * 0.02
+                
+                log(f"  💸 费率套利: {sym} {arb['direction']} | 费率 {arb['funding_rate']:.4f}%")
+                self._open_position(sym, filtered, current_price, atr)
+                signals_found += 1
+                open_count = len(self.state.get_all_positions())
+                time.sleep(2)
+
+        # 7. 检查费率套利仓位是否到期 (超过 max_hold_hours)
+        for pos in self.state.get_all_positions():
+            if "资金费率套利" in (pos.get("signal_reason") or ""):
+                if self.funding_arb.check_expiry(pos):
+                    sym = pos["symbol"]
+                    try:
+                        ticker = self.exchange.fetch_ticker(sym)
+                        price = float(ticker.get("last") or 0)
+                        if price > 0:
+                            self.pos_mgr._close_position(sym, price, "费率套利到期")
+                    except Exception as e:
+                        log(f"费率套利到期平仓 {sym} 失败: {e}", "WARN")
 
         log(f"扫描完成: 开仓 {signals_found} 笔")
 
