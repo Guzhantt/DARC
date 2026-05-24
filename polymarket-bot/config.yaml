@@ -1,29 +1,30 @@
 # All strategy knobs live here. Edit and restart the bot.
+#
+# QUICK START (beginner): leave everything alone and run `./run.sh`.
+# It will paper-trade with $100 starting equity and stop on a $10 daily loss.
 
+# ---------- Which market to trade ----------
 market:
-  # Two ways to specify the market — pick ONE:
-  #
-  # (A) Recurring market (preferred for the 15m BTC/ETH up-down series).
-  #     The bot computes the slug from the next aligned end-time and rotates
+  # (A) Recurring market — preferred for the 15m BTC/ETH up-down series.
+  #     The bot computes the slug from the current 15m boundary and rotates
   #     automatically when one market settles.
-  #     Example URLs:
-  #       https://polymarket.com/event/btc-updown-15m-<unix_ts>
-  #       https://polymarket.com/event/eth-updown-15m-<unix_ts>
+  #     Example URL: https://polymarket.com/event/btc-updown-15m-1779634800
   recurring:
     enabled: true
-    # Python str.format template. {start_unix} is filled with the current 15m boundary
-    # (the slug timestamp is the market's START time; end is start + period_sec).
+    # {start_unix} is filled with the current 15m boundary timestamp.
+    # Switch to "eth-updown-15m-{start_unix}" for ETH instead.
     slug_template: "btc-updown-15m-{start_unix}"
-    # Period in seconds. 900 = 15 minutes. Slugs are aligned to multiples of this.
+    # Period in seconds. 900 = 15 minutes.
     period_sec: 900
 
-  # (B) Fixed market. Used only when recurring.enabled = false.
+  # (B) Pin a single fixed market. Used only when recurring.enabled = false.
   slug: ""
 
-  # Optional: pin token IDs directly to bypass slug lookup. Leave blank to auto-resolve.
+  # (C) Skip Gamma lookup entirely by pasting token IDs. Leave blank to auto-resolve.
   yes_token_id: ""
   no_token_id: ""
 
+# ---------- Spot momentum signal (for direction confirmation) ----------
 spot:
   # Binance symbol used for momentum confirmation.
   symbol: "BTCUSDT"
@@ -33,10 +34,11 @@ spot:
   # 0.0005 = 5 basis points. Tune per asset volatility.
   alignment_threshold: 0.0005
 
+# ---------- Three-rule strategy (matches the user pseudocode 1:1) ----------
 strategy:
   # Polling interval during normal play.
   tick_interval_sec: 30
-  # Polling interval inside the endgame window. Lower = faster reaction, more API calls.
+  # Polling interval inside the endgame window (last 2 minutes by default).
   endgame_tick_interval_sec: 10
 
   # --- Rule 1: scout entry ---
@@ -44,7 +46,7 @@ strategy:
   scout_max_price: 0.45
   # Need at least this many seconds of remaining time to take a scout.
   scout_min_remaining_sec: 600          # 10 minutes
-  # Notional USD per scout entry.
+  # Notional USD per scout entry. Risk-cap further via risk.max_single_trade_usd below.
   scout_size_usd: 10.0
 
   # --- Rule 2: lock spread / complement ---
@@ -63,18 +65,48 @@ strategy:
   # Net YES-NO exposure (in USD notional) above which we consider position "unbalanced".
   unbalanced_threshold_usd: 1.0
 
+# ---------- Fees & slippage assumed for paper fills ----------
 fees:
   # Polymarket currently charges 0% taker fee, but slippage is not free.
   per_side_fee_rate: 0.0
-  # Estimated cost above midpoint when crossing the book.
+  # Estimated cost above midpoint when crossing the book in paper mode.
+  # Only used when an orderbook isn't available; otherwise the real best ask is used.
   slippage_estimate: 0.005
 
+# ---------- Execution quality guards (NEW) ----------
+# These reject bad-quality fills that look fine at the midpoint but would slip
+# badly when crossing a thin or wide book. Set 0 to disable a guard.
+execution_quality:
+  # Maximum bid-ask spread (in price units) we'll cross. 0.04 = 4 cents.
+  # Polymarket 15m books are typically 0.01-0.03 wide; 0.04+ is suspicious.
+  max_spread: 0.04
+  # Minimum USD notional resting within 1% of best ask. 50 = need at least
+  # $50 of size you could fill near the top of book.
+  min_depth_usd: 50.0
+
+# ---------- Risk guardrails (NEW) ----------
+# Read these even if you don't change them. They are what stops a buggy
+# strategy from blowing up your account in 10 minutes.
+risk:
+  # If equity falls more than this much below the day's start, the bot stops
+  # opening new entries until the next UTC day. Existing positions still
+  # finish (endgame hedge can still fire).
+  daily_max_loss_usd: 10.0
+  # Refuse to open a new entry when cash drops below this amount.
+  min_cash_floor_usd: 5.0
+  # Hard cap per trade. Larger requested sizes are silently downsized.
+  max_single_trade_usd: 20.0
+
+# ---------- Execution mode ----------
 execution:
-  # "paper" = simulate fills against midpoint + slippage, no real orders.
+  # "paper" = simulate fills against best-ask + slippage, no real orders.
   # "live"  = real Polygon trades. Requires py-clob-client and a funded wallet.
-  #           NOT implemented yet — see README.
+  #           NOT implemented yet — see README "Going Live".
   mode: "paper"
   paper_starting_balance_usd: 100.0
 
+# ---------- Logging ----------
 logging:
   level: "INFO"
+  # Print a one-line equity / position summary every N seconds even when nothing happened.
+  summary_interval_sec: 60

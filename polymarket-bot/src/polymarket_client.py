@@ -41,12 +41,24 @@ class MarketInfo:
 
 
 @dataclass
+class BookSide:
+    """One side of an orderbook with best price + cumulative depth."""
+    best_price: float             # best ask for buys; best bid for sells
+    spread: float                 # (ask - bid), reliability indicator
+    depth_at_best_usd: float      # USD notional resting at best price
+    depth_within_1pct_usd: float  # USD notional within 1% of best (slippage proxy)
+    has_quotes: bool
+
+
+@dataclass
 class MarketSnapshot:
     """One tick's worth of market data for the strategy."""
     yes_price: float
     no_price: float
     remaining_sec: float          # may be negative if past end_date
     fetched_at: datetime
+    yes_book: Optional[BookSide] = None
+    no_book: Optional[BookSide] = None
 
 
 def current_aligned_unix(period_sec: int, now_sec: Optional[float] = None) -> int:
@@ -179,17 +191,66 @@ class PolymarketClient:
         except (TypeError, ValueError) as e:
             raise PolymarketError(f"CLOB midpoint not numeric: {mid!r}") from e
 
-    def get_snapshot(self, market: MarketInfo) -> MarketSnapshot:
-        """Fetch YES + NO midpoint and compute remaining_sec from end_date_iso."""
+    def get_book(self, token_id: str) -> Optional[BookSide]:
+        """Fetch L2 orderbook for one token and summarize buy-side execution quality.
+
+        Returns None if the book is empty or the request fails — the strategy
+        treats that as "skip this side". Polymarket's /book endpoint returns
+        bids and asks as lists of {"price": str, "size": str} objects.
+        """
+        try:
+            resp = self._session.get(
+                f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except requests.RequestException as e:
+            log.debug("Book fetch failed for %s: %s", token_id, e)
+            return None
+        except ValueError:
+            return None
+
+        asks = _parse_book_levels(body.get("asks") or [])
+        bids = _parse_book_levels(body.get("bids") or [])
+        # Defensive sort — different Polymarket endpoints have shipped different orderings.
+        asks.sort(key=lambda x: x[0])           # cheapest ask first
+        bids.sort(key=lambda x: x[0], reverse=True)  # highest bid first
+        if not asks:
+            return BookSide(0.0, 1.0, 0.0, 0.0, False)
+        best_ask = asks[0][0]
+        best_bid = bids[0][0] if bids else 0.0
+        spread = max(0.0, best_ask - best_bid)
+
+        depth_at_best = asks[0][0] * asks[0][1]
+        cutoff = best_ask * 1.01
+        depth_within_1pct = sum(p * s for p, s in asks if p <= cutoff)
+        return BookSide(
+            best_price=best_ask,
+            spread=spread,
+            depth_at_best_usd=depth_at_best,
+            depth_within_1pct_usd=depth_within_1pct,
+            has_quotes=True,
+        )
+
+    def get_snapshot(self, market: MarketInfo, fetch_books: bool = True) -> MarketSnapshot:
+        """Fetch YES + NO midpoint and (optionally) orderbook depth.
+
+        Books are best-effort: if the /book endpoint fails we still return a
+        usable snapshot, the strategy will just skip the spread-quality check.
+        """
         yes_price = self.get_midpoint(market.yes_token_id)
         no_price = self.get_midpoint(market.no_token_id)
         now = datetime.now(timezone.utc)
         remaining = _remaining_seconds(market.end_date_iso, now)
+        yes_book = self.get_book(market.yes_token_id) if fetch_books else None
+        no_book = self.get_book(market.no_token_id) if fetch_books else None
         return MarketSnapshot(
             yes_price=yes_price,
             no_price=no_price,
             remaining_sec=remaining,
             fetched_at=now,
+            yes_book=yes_book,
+            no_book=no_book,
         )
 
 
@@ -235,6 +296,25 @@ def _market_from_gamma(m: dict) -> MarketInfo:
         closed=bool(m.get("closed", False)),
         active=bool(m.get("active", True)),
     )
+
+
+def _parse_book_levels(levels: list) -> list[tuple[float, float]]:
+    """Coerce Polymarket book entries to (price, size) floats.
+
+    The API returns prices and sizes as strings like "0.42" / "150.00". We
+    drop malformed levels silently to keep the data path resilient.
+    """
+    out: list[tuple[float, float]] = []
+    for lvl in levels:
+        try:
+            p = float(lvl["price"])
+            s = float(lvl["size"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if p <= 0 or s <= 0:
+            continue
+        out.append((p, s))
+    return out
 
 
 def _remaining_seconds(end_date_iso: Optional[str], now: datetime) -> float:

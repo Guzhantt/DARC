@@ -77,6 +77,18 @@ class PortfolioState:
         """
         return abs(self.net_share_exposure()) > threshold_usd
 
+    def mark_to_market_equity(self, yes_price: float, no_price: float) -> float:
+        """Cash + open positions valued at current midpoint.
+
+        For binary outcomes share value is bounded in [0, 1] and unrealized
+        P/L is share_count * (current_midpoint - avg_buy_price). Using
+        midpoint understates risk slightly (you'd sell into the bid in
+        reality) but it's the right conservative read for risk decisions.
+        """
+        yes_value = self.yes.shares * yes_price
+        no_value = self.no.shares * no_price
+        return self.cash_usd + yes_value + no_value
+
     # ---------- mutation ----------
 
     def apply_buy(self, side: Side, shares: float, price: float, fee_usd: float) -> None:

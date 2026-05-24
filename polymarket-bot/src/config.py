@@ -52,6 +52,20 @@ class FeesCfg:
 
 
 @dataclass
+class ExecutionQualityCfg:
+    """Hard guards against bad fills. Set max_spread / min_depth_usd to 0 to disable."""
+    max_spread: float
+    min_depth_usd: float
+
+
+@dataclass
+class RiskCfg:
+    daily_max_loss_usd: float
+    min_cash_floor_usd: float
+    max_single_trade_usd: float
+
+
+@dataclass
 class ExecutionCfg:
     mode: str
     paper_starting_balance_usd: float
@@ -60,6 +74,7 @@ class ExecutionCfg:
 @dataclass
 class LoggingCfg:
     level: str
+    summary_interval_sec: int
 
 
 @dataclass
@@ -68,6 +83,8 @@ class Config:
     spot: SpotCfg
     strategy: StrategyCfg
     fees: FeesCfg
+    execution_quality: ExecutionQualityCfg
+    risk: RiskCfg
     execution: ExecutionCfg
     logging: LoggingCfg
 
@@ -95,6 +112,8 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         spot=SpotCfg(**_section(raw, "spot")),
         strategy=StrategyCfg(**_section(raw, "strategy")),
         fees=FeesCfg(**_section(raw, "fees")),
+        execution_quality=ExecutionQualityCfg(**_section(raw, "execution_quality")),
+        risk=RiskCfg(**_section(raw, "risk")),
         execution=ExecutionCfg(**_section(raw, "execution")),
         logging=LoggingCfg(**_section(raw, "logging")),
     )
@@ -115,5 +134,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
             raise ValueError("market.recurring.period_sec must be positive")
     elif not cfg.market.slug:
         raise ValueError("Either market.recurring.enabled=true or market.slug must be set")
+    if cfg.risk.max_single_trade_usd <= 0:
+        raise ValueError("risk.max_single_trade_usd must be > 0")
+    if cfg.risk.daily_max_loss_usd <= 0:
+        raise ValueError("risk.daily_max_loss_usd must be > 0 (kill switch must be configured)")
 
     return cfg
