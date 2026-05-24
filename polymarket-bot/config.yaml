@@ -1,0 +1,80 @@
+# All strategy knobs live here. Edit and restart the bot.
+
+market:
+  # Two ways to specify the market — pick ONE:
+  #
+  # (A) Recurring market (preferred for the 15m BTC/ETH up-down series).
+  #     The bot computes the slug from the next aligned end-time and rotates
+  #     automatically when one market settles.
+  #     Example URLs:
+  #       https://polymarket.com/event/btc-updown-15m-<unix_ts>
+  #       https://polymarket.com/event/eth-updown-15m-<unix_ts>
+  recurring:
+    enabled: true
+    # Python str.format template. {start_unix} is filled with the current 15m boundary
+    # (the slug timestamp is the market's START time; end is start + period_sec).
+    slug_template: "btc-updown-15m-{start_unix}"
+    # Period in seconds. 900 = 15 minutes. Slugs are aligned to multiples of this.
+    period_sec: 900
+
+  # (B) Fixed market. Used only when recurring.enabled = false.
+  slug: ""
+
+  # Optional: pin token IDs directly to bypass slug lookup. Leave blank to auto-resolve.
+  yes_token_id: ""
+  no_token_id: ""
+
+spot:
+  # Binance symbol used for momentum confirmation.
+  symbol: "BTCUSDT"
+  # How many 1-minute candles to look back when computing signed momentum.
+  lookback_minutes: 5
+  # Minimum |signed return| over the lookback to count as "momentum aligned".
+  # 0.0005 = 5 basis points. Tune per asset volatility.
+  alignment_threshold: 0.0005
+
+strategy:
+  # Polling interval during normal play.
+  tick_interval_sec: 30
+  # Polling interval inside the endgame window. Lower = faster reaction, more API calls.
+  endgame_tick_interval_sec: 10
+
+  # --- Rule 1: scout entry ---
+  # Cheap side must be at most this price.
+  scout_max_price: 0.45
+  # Need at least this many seconds of remaining time to take a scout.
+  scout_min_remaining_sec: 600          # 10 minutes
+  # Notional USD per scout entry.
+  scout_size_usd: 10.0
+
+  # --- Rule 2: lock spread / complement ---
+  # YES + NO must be at most this for the arb signal to fire.
+  arb_total_threshold: 0.97
+  # Need at least this many seconds left to attempt the complement leg.
+  arb_min_remaining_sec: 180            # 3 minutes
+  # Required edge after fees + slippage to actually buy the complement.
+  min_profit_after_fees: 0.02
+
+  # --- Rule 3: endgame ---
+  # When remaining_time < this, switch to endgame logic and faster polling.
+  endgame_remaining_sec: 120            # 2 minutes
+  # How much of the unbalanced position to hedge if spot disagrees.
+  endgame_hedge_ratio: 0.5
+  # Net YES-NO exposure (in USD notional) above which we consider position "unbalanced".
+  unbalanced_threshold_usd: 1.0
+
+fees:
+  # Polymarket currently charges 0% taker fee, but slippage is not free.
+  per_side_fee_rate: 0.0
+  # Estimated cost above midpoint when crossing the book.
+  slippage_estimate: 0.005
+
+execution:
+  # "paper" = simulate fills against midpoint + slippage, no real orders.
+  # "live"  = real Polygon trades. Requires py-clob-client and a funded wallet.
+  #           NOT implemented yet — see README.
+  mode: "paper"
+  paper_starting_balance_usd: 100.0
+
+logging:
+  level: "INFO"
