@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import requests
 
@@ -30,45 +30,40 @@ class PolymarketError(RuntimeError):
 
 @dataclass
 class MarketInfo:
-    """Subset of market metadata we actually use."""
     slug: str
     question: str
     yes_token_id: str
     no_token_id: str
-    end_date_iso: Optional[str]   # ISO 8601, may be None for open-ended markets
+    end_date_iso: Optional[str]
     closed: bool
     active: bool
 
 
 @dataclass
 class BookSide:
-    """One side of an orderbook with best price + cumulative depth."""
-    best_price: float             # best ask for buys; best bid for sells
-    spread: float                 # (ask - bid), reliability indicator
-    depth_at_best_usd: float      # USD notional resting at best price
-    depth_within_1pct_usd: float  # USD notional within 1% of best (slippage proxy)
+    best_price: float            # best ask for buys; we derive best bid from spread
+    spread: float                # ask - bid
+    depth_at_best_usd: float
+    depth_within_1pct_usd: float
     has_quotes: bool
 
 
 @dataclass
 class MarketSnapshot:
-    """One tick's worth of market data for the strategy."""
     yes_price: float
     no_price: float
-    remaining_sec: float          # may be negative if past end_date
+    remaining_sec: float
     fetched_at: datetime
     yes_book: Optional[BookSide] = None
     no_book: Optional[BookSide] = None
 
 
 def current_aligned_unix(period_sec: int, now_sec: Optional[float] = None) -> int:
-    """Largest multiple of `period_sec` not exceeding `now`.
+    """floor(now / period) * period.
 
     For Polymarket's recurring up/down series the slug timestamp is the
     market's START time, e.g. btc-updown-15m-1779634800 starts at 2026-05-24
-    15:00 UTC and ends at 15:15 UTC. So the *currently trading* slug is
-    floor(now / period) * period. At an exact boundary we advance to the new
-    market (the previous one is settling and no longer tradeable).
+    15:00 UTC and ends at 15:15 UTC.
     """
     if now_sec is None:
         now_sec = time.time()
@@ -85,45 +80,42 @@ class PolymarketClient:
 
     # ---------- metadata ----------
 
-    def get_current_recurring_market(self, slug_template: str, period_sec: int) -> MarketInfo:
-        """Resolve the active market for a recurring series like btc-updown-15m.
+    def get_current_recurring_market(
+        self, slug_templates: List[str], period_sec: int,
+    ) -> MarketInfo:
+        """Cascade resolver for a recurring series with multiple symbol fallbacks.
 
-        Tries the current aligned start timestamp first. If that slug isn't
-        listed yet (rare — Polymarket usually pre-lists), falls back to the
-        next one and the previous one before giving up.
+        Tries each template in order at offsets {0, +1, -1} periods. First
+        active (non-closed) match wins.
+
+        Templates can be e.g. ['btc-updown-15m-{start_unix}',
+        'eth-updown-15m-{start_unix}']: BTC tried first, ETH used if BTC fails.
         """
+        if not slug_templates:
+            raise PolymarketError("No slug templates configured")
         last_err: Optional[Exception] = None
         base = current_aligned_unix(period_sec)
-        # Order: current → next (in case current isn't listed yet) → previous
-        # (in case we just rolled over and the new one is delayed).
-        for offset_periods in (0, 1, -1):
-            start_unix = base + offset_periods * period_sec
-            slug = slug_template.format(start_unix=start_unix)
-            try:
-                info = self.get_market_by_slug(slug)
-                if info.closed:
-                    log.debug("Slug %s is closed, trying next candidate", slug)
-                    continue
-                return info
-            except PolymarketError as e:
-                last_err = e
-                log.debug("Recurring slug %s not found: %s", slug, e)
+        for tmpl in slug_templates:
+            for offset in (0, 1, -1):
+                start_unix = base + offset * period_sec
+                slug = tmpl.format(start_unix=start_unix)
+                try:
+                    info = self.get_market_by_slug(slug)
+                    if info.closed:
+                        log.debug("Slug %s is closed, trying next candidate", slug)
+                        continue
+                    return info
+                except PolymarketError as e:
+                    last_err = e
+                    log.debug("Recurring slug %s not found: %s", slug, e)
         raise PolymarketError(
-            f"No active recurring market found for template={slug_template!r}; last error: {last_err}"
+            f"No active recurring market for any template; last error: {last_err}"
         )
 
     def get_market_by_slug(self, slug: str) -> MarketInfo:
-        """Resolve a market slug to token IDs and end date via Gamma.
-
-        Polymarket exposes both /markets and /events. Recurring up/down markets
-        are usually accessible directly under /markets, but for /event/<slug>
-        URLs we fall back to /events and pick the first child market.
-        """
-        # Try /markets first.
         info = self._try_markets_endpoint(slug)
         if info is not None:
             return info
-        # Fall back to /events (the URL pattern /event/<slug> uses this).
         info = self._try_events_endpoint(slug)
         if info is not None:
             return info
@@ -140,7 +132,6 @@ class PolymarketClient:
             resp.raise_for_status()
         except requests.RequestException as e:
             raise PolymarketError(f"Gamma /markets HTTP error for slug={slug}: {e}") from e
-
         data = resp.json()
         if not isinstance(data, list) or not data:
             return None
@@ -157,15 +148,12 @@ class PolymarketClient:
             resp.raise_for_status()
         except requests.RequestException as e:
             raise PolymarketError(f"Gamma /events HTTP error for slug={slug}: {e}") from e
-
         data = resp.json()
         if not isinstance(data, list) or not data:
             return None
         markets = data[0].get("markets") or []
         if not markets:
             return None
-        # Recurring up/down events have exactly one child market; pick the first
-        # active, non-closed one.
         for m in markets:
             if m.get("active", True) and not m.get("closed", False):
                 return _market_from_gamma(m)
@@ -174,14 +162,12 @@ class PolymarketClient:
     # ---------- prices ----------
 
     def get_midpoint(self, token_id: str) -> float:
-        """Midpoint price for a single CLOB token. Returns price in [0, 1]."""
         url = f"{CLOB_BASE}/midpoint"
         try:
             resp = self._session.get(url, params={"token_id": token_id}, timeout=self._timeout)
             resp.raise_for_status()
         except requests.RequestException as e:
             raise PolymarketError(f"CLOB midpoint request failed for {token_id}: {e}") from e
-
         body = resp.json()
         mid = body.get("mid")
         if mid is None:
@@ -192,12 +178,6 @@ class PolymarketClient:
             raise PolymarketError(f"CLOB midpoint not numeric: {mid!r}") from e
 
     def get_book(self, token_id: str) -> Optional[BookSide]:
-        """Fetch L2 orderbook for one token and summarize buy-side execution quality.
-
-        Returns None if the book is empty or the request fails — the strategy
-        treats that as "skip this side". Polymarket's /book endpoint returns
-        bids and asks as lists of {"price": str, "size": str} objects.
-        """
         try:
             resp = self._session.get(
                 f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=self._timeout,
@@ -212,15 +192,13 @@ class PolymarketClient:
 
         asks = _parse_book_levels(body.get("asks") or [])
         bids = _parse_book_levels(body.get("bids") or [])
-        # Defensive sort — different Polymarket endpoints have shipped different orderings.
-        asks.sort(key=lambda x: x[0])           # cheapest ask first
-        bids.sort(key=lambda x: x[0], reverse=True)  # highest bid first
+        asks.sort(key=lambda x: x[0])
+        bids.sort(key=lambda x: x[0], reverse=True)
         if not asks:
             return BookSide(0.0, 1.0, 0.0, 0.0, False)
         best_ask = asks[0][0]
         best_bid = bids[0][0] if bids else 0.0
         spread = max(0.0, best_ask - best_bid)
-
         depth_at_best = asks[0][0] * asks[0][1]
         cutoff = best_ask * 1.01
         depth_within_1pct = sum(p * s for p, s in asks if p <= cutoff)
@@ -233,11 +211,6 @@ class PolymarketClient:
         )
 
     def get_snapshot(self, market: MarketInfo, fetch_books: bool = True) -> MarketSnapshot:
-        """Fetch YES + NO midpoint and (optionally) orderbook depth.
-
-        Books are best-effort: if the /book endpoint fails we still return a
-        usable snapshot, the strategy will just skip the spread-quality check.
-        """
         yes_price = self.get_midpoint(market.yes_token_id)
         no_price = self.get_midpoint(market.no_token_id)
         now = datetime.now(timezone.utc)
@@ -245,17 +218,13 @@ class PolymarketClient:
         yes_book = self.get_book(market.yes_token_id) if fetch_books else None
         no_book = self.get_book(market.no_token_id) if fetch_books else None
         return MarketSnapshot(
-            yes_price=yes_price,
-            no_price=no_price,
-            remaining_sec=remaining,
-            fetched_at=now,
-            yes_book=yes_book,
-            no_book=no_book,
+            yes_price=yes_price, no_price=no_price,
+            remaining_sec=remaining, fetched_at=now,
+            yes_book=yes_book, no_book=no_book,
         )
 
 
 def _market_from_gamma(m: dict) -> MarketInfo:
-    """Parse a market dict from either /markets or /events response."""
     raw_ids = m.get("clobTokenIds")
     if isinstance(raw_ids, str):
         try:
@@ -264,7 +233,6 @@ def _market_from_gamma(m: dict) -> MarketInfo:
             raise PolymarketError(f"Cannot parse clobTokenIds: {raw_ids!r}") from e
     else:
         token_ids = raw_ids
-
     if not isinstance(token_ids, list) or len(token_ids) < 2:
         raise PolymarketError(f"Market has no YES/NO token pair: {token_ids!r}")
 
@@ -277,8 +245,6 @@ def _market_from_gamma(m: dict) -> MarketInfo:
     if not outcomes:
         outcomes = ["Yes", "No"]
 
-    # Map outcomes to token IDs by index. Polymarket convention varies — Up/Down,
-    # Yes/No, True/False all show up — so we match defensively.
     yes_synonyms = {"yes", "up", "true"}
     no_synonyms = {"no", "down", "false"}
     yes_idx = next((i for i, o in enumerate(outcomes) if str(o).strip().lower() in yes_synonyms), 0)
@@ -299,11 +265,6 @@ def _market_from_gamma(m: dict) -> MarketInfo:
 
 
 def _parse_book_levels(levels: list) -> list[tuple[float, float]]:
-    """Coerce Polymarket book entries to (price, size) floats.
-
-    The API returns prices and sizes as strings like "0.42" / "150.00". We
-    drop malformed levels silently to keep the data path resilient.
-    """
     out: list[tuple[float, float]] = []
     for lvl in levels:
         try:
@@ -318,15 +279,9 @@ def _parse_book_levels(levels: list) -> list[tuple[float, float]]:
 
 
 def _remaining_seconds(end_date_iso: Optional[str], now: datetime) -> float:
-    """Parse Polymarket's ISO end date and return seconds until it.
-
-    Returns +inf when the market has no end date (open-ended), so time-based
-    rules degrade gracefully — strategy can still gate on price/momentum.
-    """
     if not end_date_iso:
         return float("inf")
     try:
-        # Polymarket sometimes returns "2025-05-24T19:00:00Z" and sometimes with offset.
         end = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
     except ValueError:
         log.warning("Could not parse end_date_iso=%r, treating as no deadline", end_date_iso)

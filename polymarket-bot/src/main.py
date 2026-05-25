@@ -1,18 +1,17 @@
 """Bot entry point.
 
-Adaptive polling loop:
-  - Default interval = strategy.tick_interval_sec.
-  - Inside the endgame window (remaining < strategy.endgame_remaining_sec)
-    we drop to strategy.endgame_tick_interval_sec for faster reaction.
-  - When a recurring market settles, we resolve the next one and continue,
-    keeping the same in-memory portfolio state.
+Adaptive polling:
+  - Outside session window: sleep `session.off_hours_poll_sec` and re-check.
+  - In session, normal market: `strategy.tick_interval_sec` (default 30s).
+  - In session, endgame:       `strategy.endgame_tick_interval_sec` (default 10s).
 
-Run with:  python -m src.main
-       or: ./run.sh         (recommended, handles venv + deps)
+Run with:  ./run.sh
+       or: python -m src.main
 
 Flags:
-  --preflight-only   Run health checks and exit. Useful before going live.
-  --once             Trade exactly one market window then exit.
+  --preflight-only  Run health checks and exit.
+  --once            Trade exactly one market window then exit.
+  --config PATH     Use a different config file.
 """
 from __future__ import annotations
 
@@ -29,7 +28,8 @@ from .journal import Journal
 from .polymarket_client import MarketInfo, PolymarketClient, PolymarketError
 from .preflight import run_preflight
 from .risk import RiskState
-from .spot_client import SpotClient, SpotError
+from .session import SessionWindow, from_config as session_from_config
+from .spot_client import SpotClient, SpotError, momentum_score
 from .state import PortfolioState
 from .strategy import decide
 
@@ -44,7 +44,6 @@ def _install_signal_handlers() -> None:
         global _should_stop
         log.info("Caught signal %s — shutting down after this tick", signum)
         _should_stop = True
-
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
@@ -67,20 +66,15 @@ def _build_executor(cfg: Config, state: PortfolioState, journal: Journal) -> Bas
 
 
 def _resolve_market(cfg: Config, client: PolymarketClient) -> MarketInfo:
-    """Resolve current market according to config. Pinned token IDs win if set."""
     m = cfg.market
     if m.yes_token_id and m.no_token_id:
         return MarketInfo(
-            slug=m.slug or "(pinned)",
-            question="(pinned token IDs)",
-            yes_token_id=m.yes_token_id,
-            no_token_id=m.no_token_id,
-            end_date_iso=None,
-            closed=False,
-            active=True,
+            slug=m.slug or "(pinned)", question="(pinned token IDs)",
+            yes_token_id=m.yes_token_id, no_token_id=m.no_token_id,
+            end_date_iso=None, closed=False, active=True,
         )
     if m.recurring.enabled:
-        return client.get_current_recurring_market(m.recurring.slug_template, m.recurring.period_sec)
+        return client.get_current_recurring_market(m.recurring.slug_templates, m.recurring.period_sec)
     return client.get_market_by_slug(m.slug)
 
 
@@ -89,10 +83,15 @@ def _print_banner(cfg: Config) -> None:
     log.info("polymarket-bot starting")
     log.info("  mode             : %s", cfg.execution.mode.upper())
     log.info("  starting equity  : $%.2f", cfg.execution.paper_starting_balance_usd)
-    log.info("  daily loss limit : $%.2f (kill switch)", cfg.risk.daily_max_loss_usd)
+    if cfg.risk.daily_max_loss_pct > 0:
+        log.info("  daily loss limit : %.1f%% of equity (= $%.2f) — kill switch",
+                 cfg.risk.daily_max_loss_pct * 100,
+                 cfg.execution.paper_starting_balance_usd * cfg.risk.daily_max_loss_pct)
+    if cfg.risk.daily_max_loss_usd > 0:
+        log.info("                     also capped at $%.2f", cfg.risk.daily_max_loss_usd)
     log.info("  max per trade    : $%.2f", cfg.risk.max_single_trade_usd)
-    log.info("  recurring market : %s | template=%s",
-             cfg.market.recurring.enabled, cfg.market.recurring.slug_template)
+    log.info("  stop-loss        : %.1f%% per side", cfg.strategy.stop_loss_pct * 100)
+    log.info("  recurring market : %s", cfg.market.recurring.slug_templates)
     log.info("=" * 64)
 
 
@@ -125,15 +124,28 @@ def run() -> int:
         return 0
 
     poly = PolymarketClient()
-    spot = SpotClient(cfg.spot.symbol, cfg.spot.lookback_minutes, cfg.spot.alignment_threshold)
+    spot = SpotClient(
+        cfg.spot.symbol,
+        short_lookback_minutes=cfg.spot.short_lookback_minutes,
+        long_lookback_minutes=cfg.spot.long_lookback_minutes,
+        alignment_threshold=cfg.spot.alignment_threshold,
+        rsi_period=cfg.spot.rsi_period,
+        volume_lookback_minutes=cfg.spot.volume_lookback_minutes,
+    )
     state = PortfolioState(cash_usd=cfg.execution.paper_starting_balance_usd)
     journal = Journal()
     executor = _build_executor(cfg, state, journal)
     risk = RiskState(
         starting_equity_usd=cfg.execution.paper_starting_balance_usd,
+        daily_max_loss_pct=cfg.risk.daily_max_loss_pct,
         daily_max_loss_usd=cfg.risk.daily_max_loss_usd,
         min_cash_floor_usd=cfg.risk.min_cash_floor_usd,
         max_single_trade_usd=cfg.risk.max_single_trade_usd,
+    )
+    session_window: SessionWindow = session_from_config(
+        cfg.session.enabled_hours_utc_start,
+        cfg.session.enabled_hours_utc_end,
+        cfg.session.enabled_weekdays,
     )
 
     market: Optional[MarketInfo] = None
@@ -141,6 +153,13 @@ def run() -> int:
     last_summary_ts = 0.0
 
     while not _should_stop:
+        # 0. Session gate — sleep idly outside hours unless we have an open
+        #    position that still needs management (stop-loss / endgame).
+        if not session_window.is_open() and not state.has_position():
+            log.info("[off-hours] no positions, sleeping %ds", cfg.session.off_hours_poll_sec)
+            time.sleep(cfg.session.off_hours_poll_sec)
+            continue
+
         # 1. Resolve / rotate the market.
         try:
             if market is None or market.closed:
@@ -165,11 +184,11 @@ def run() -> int:
             time.sleep(cfg.strategy.tick_interval_sec)
             continue
 
-        # 3. Mark-to-market and update kill switch.
+        # 3. Mark-to-market & risk update.
         equity = state.mark_to_market_equity(snap.yes_price, snap.no_price)
         risk.update(equity)
 
-        # 4. Settled? Roll to next market.
+        # 4. Settled?
         if snap.remaining_sec <= 0:
             log.info("Market %s ended. equity=$%.2f %s", market.slug, equity, state.summary())
             markets_traded += 1
@@ -177,60 +196,89 @@ def run() -> int:
                 log.info("--once: completed one market, exiting.")
                 break
             market = None
-            time.sleep(2)  # let Gamma list the next slug
+            time.sleep(2)
             continue
 
-        # 5. Run strategy → executor.
+        # 5. Decide.
         intents, decision = decide(cfg, snap, mom, state)
 
-        # Risk veto: block any new opening trade if kill switch / cash floor is hit.
-        # Endgame hedges are always allowed (they reduce risk, not increase it).
-        if intents and decision != "ENDGAME_HEDGE":
-            allowed, why = risk.can_open_new_position(state.cash_usd)
-            if not allowed:
-                decision = f"BLOCKED_{why}"
-                intents = []
+        # 6. Risk veto: block opening trades if kill switch / cash floor is hit.
+        #    Closing trades (SELL or ENDGAME_HEDGE) are always allowed — they reduce risk.
+        if intents:
+            opening = [i for i in intents if i.action == "BUY" and decision not in ("ENDGAME_HEDGE",)]
+            if opening:
+                allowed, why = risk.can_open_new_position(state.cash_usd)
+                if not allowed:
+                    decision = f"BLOCKED_{why}"
+                    intents = [i for i in intents if i not in opening]
 
+        # 7. Off-session: refuse to OPEN new positions; SELL / ENDGAME still allowed.
+        if not session_window.is_open():
+            opening = [i for i in intents if i.action == "BUY" and decision != "ENDGAME_HEDGE"]
+            if opening:
+                decision = "BLOCKED_off_hours"
+                intents = [i for i in intents if i not in opening]
+
+        # 8. Execute.
         for intent in intents:
-            capped_usd = risk.cap_trade_size(intent.target_usd)
-            log.info("INTENT %s $%.2f @ ~%.4f | %s",
-                     intent.side, capped_usd, intent.midpoint, intent.reason)
             try:
-                executor.buy(
-                    intent.side, capped_usd, intent.midpoint,
-                    market_slug=market.slug, reason=intent.reason,
-                )
+                if intent.action == "BUY":
+                    capped_usd = risk.cap_trade_size(intent.size)
+                    log.info("INTENT BUY  %s $%.2f @ ~%.4f | %s",
+                             intent.side, capped_usd, intent.midpoint, intent.reason)
+                    book = snap.yes_book if intent.side == "YES" else snap.no_book
+                    best_ask = book.best_price if book and book.has_quotes else None
+                    executor.buy(
+                        intent.side, capped_usd, intent.midpoint,
+                        market_slug=market.slug, reason=intent.reason,
+                        spot_price=mom.last_price, best_ask=best_ask,
+                    )
+                else:  # SELL
+                    log.info("INTENT SELL %s %.3f sh @ ~%.4f | %s",
+                             intent.side, intent.size, intent.midpoint, intent.reason)
+                    book = snap.yes_book if intent.side == "YES" else snap.no_book
+                    best_bid = (book.best_price - book.spread) if (book and book.has_quotes and book.spread > 0) else None
+                    executor.sell(
+                        intent.side, intent.size, intent.midpoint,
+                        market_slug=market.slug, reason=intent.reason,
+                        best_bid=best_bid,
+                    )
             except NotImplementedError as e:
                 log.error("Execution not wired: %s", e)
                 return 2
             except Exception as e:
                 log.exception("Executor error: %s", e)
 
-        # 6. Journal this tick.
+        # 9. Journal this tick.
+        total = snap.yes_price + snap.no_price
         journal.record_tick(
             market_slug=market.slug,
-            yes_price=snap.yes_price,
-            no_price=snap.no_price,
+            yes_price=snap.yes_price, no_price=snap.no_price,
             remaining_sec=snap.remaining_sec,
             spot_last=mom.last_price,
-            spot_signed_return=mom.signed_return,
+            spot_short_return=mom.short_return,
+            spot_long_return=mom.long_return,
+            spot_rsi=mom.rsi,
+            spot_volume_ratio=mom.volume_ratio,
+            momentum_score=momentum_score(mom, total),
             decision=decision,
-            yes_shares=state.yes.shares,
-            no_shares=state.no.shares,
-            cash_usd=state.cash_usd,
+            yes_shares=state.yes.shares, no_shares=state.no.shares,
+            cash_usd=state.cash_usd, equity_usd=equity,
         )
 
-        # 7. Periodic summary (always, even if no trade).
+        # 10. Periodic summary.
         now = time.time()
         if now - last_summary_ts >= cfg.logging.summary_interval_sec:
             last_summary_ts = now
             log.info(
-                "[summary] yes=%.4f no=%.4f total=%.4f remaining=%.0fs | equity=$%.2f | %s | last=%s",
-                snap.yes_price, snap.no_price, snap.yes_price + snap.no_price,
-                snap.remaining_sec, equity, state.summary(), decision,
+                "[summary] %s | yes=%.4f no=%.4f total=%.4f rem=%.0fs | "
+                "spot=%.0f short=%+.3f%% long=%+.3f%% rsi=%.0f vol=%.2fx | equity=$%.2f | %s | %s",
+                market.slug, snap.yes_price, snap.no_price, total, snap.remaining_sec,
+                mom.last_price, mom.short_return * 100, mom.long_return * 100,
+                mom.rsi, mom.volume_ratio, equity, state.summary(), decision,
             )
 
-        # 8. Adaptive sleep.
+        # 11. Adaptive sleep.
         interval = (
             cfg.strategy.endgame_tick_interval_sec
             if snap.remaining_sec < cfg.strategy.endgame_remaining_sec
@@ -240,10 +288,8 @@ def run() -> int:
         time.sleep(interval)
 
     log.info(
-        "Stopped. markets_traded=%d | final equity=$%.2f | %s",
-        markets_traded,
-        state.mark_to_market_equity(0.5, 0.5),  # midpoint estimate when shut down
-        state.summary(),
+        "Stopped. markets_traded=%d | %s",
+        markets_traded, state.summary(),
     )
     log.info("Trade log: logs/trades.csv | Tick log: logs/ticks.csv")
     return 0

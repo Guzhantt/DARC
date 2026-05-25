@@ -1,17 +1,25 @@
 """YAML config loader with light validation."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, List
 
 import yaml
 
 
 @dataclass
+class SessionCfg:
+    enabled_hours_utc_start: int
+    enabled_hours_utc_end: int
+    enabled_weekdays: List[int]
+    off_hours_poll_sec: int
+
+
+@dataclass
 class RecurringCfg:
     enabled: bool
-    slug_template: str
+    slug_templates: List[str]
     period_sec: int
 
 
@@ -26,8 +34,11 @@ class MarketCfg:
 @dataclass
 class SpotCfg:
     symbol: str
-    lookback_minutes: int
+    short_lookback_minutes: int
+    long_lookback_minutes: int
     alignment_threshold: float
+    rsi_period: int
+    volume_lookback_minutes: int
 
 
 @dataclass
@@ -43,6 +54,9 @@ class StrategyCfg:
     endgame_remaining_sec: int
     endgame_hedge_ratio: float
     unbalanced_threshold_usd: float
+    stop_loss_pct: float
+    inverted_total_threshold: float
+    inverted_spot_reversal_pct: float
 
 
 @dataclass
@@ -53,13 +67,13 @@ class FeesCfg:
 
 @dataclass
 class ExecutionQualityCfg:
-    """Hard guards against bad fills. Set max_spread / min_depth_usd to 0 to disable."""
     max_spread: float
     min_depth_usd: float
 
 
 @dataclass
 class RiskCfg:
+    daily_max_loss_pct: float
     daily_max_loss_usd: float
     min_cash_floor_usd: float
     max_single_trade_usd: float
@@ -79,6 +93,7 @@ class LoggingCfg:
 
 @dataclass
 class Config:
+    session: SessionCfg
     market: MarketCfg
     spot: SpotCfg
     strategy: StrategyCfg
@@ -103,11 +118,22 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     with p.open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
+    # session
+    session_cfg = SessionCfg(**_section(raw, "session"))
+
+    # market — recurring nested
     market_raw = _section(raw, "market")
-    rec_raw = market_raw.pop("recurring", None) or {"enabled": False, "slug_template": "", "period_sec": 900}
+    rec_raw = market_raw.pop("recurring", None) or {
+        "enabled": False, "slug_templates": [], "period_sec": 900,
+    }
+    # Backward compat: accept singular `slug_template` and promote to list.
+    if "slug_template" in rec_raw and "slug_templates" not in rec_raw:
+        st = rec_raw.pop("slug_template")
+        rec_raw["slug_templates"] = [st] if st else []
     market_cfg = MarketCfg(recurring=RecurringCfg(**rec_raw), **market_raw)
 
     cfg = Config(
+        session=session_cfg,
         market=market_cfg,
         spot=SpotCfg(**_section(raw, "spot")),
         strategy=StrategyCfg(**_section(raw, "strategy")),
@@ -118,7 +144,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         logging=LoggingCfg(**_section(raw, "logging")),
     )
 
-    # Sanity checks. Catching these here saves debugging mid-loop.
+    # ---------- validation ----------
     if cfg.execution.mode not in ("paper", "live"):
         raise ValueError(f"execution.mode must be 'paper' or 'live', got {cfg.execution.mode!r}")
     if not (0 < cfg.strategy.scout_max_price < 1):
@@ -128,15 +154,24 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     if cfg.strategy.tick_interval_sec <= 0 or cfg.strategy.endgame_tick_interval_sec <= 0:
         raise ValueError("tick intervals must be positive")
     if cfg.market.recurring.enabled:
-        if "{start_unix}" not in cfg.market.recurring.slug_template:
-            raise ValueError("market.recurring.slug_template must contain '{start_unix}' placeholder")
+        if not cfg.market.recurring.slug_templates:
+            raise ValueError("market.recurring.enabled=true but slug_templates is empty")
+        for tmpl in cfg.market.recurring.slug_templates:
+            if "{start_unix}" not in tmpl:
+                raise ValueError(f"slug template {tmpl!r} must contain '{{start_unix}}'")
         if cfg.market.recurring.period_sec <= 0:
             raise ValueError("market.recurring.period_sec must be positive")
     elif not cfg.market.slug:
         raise ValueError("Either market.recurring.enabled=true or market.slug must be set")
     if cfg.risk.max_single_trade_usd <= 0:
         raise ValueError("risk.max_single_trade_usd must be > 0")
-    if cfg.risk.daily_max_loss_usd <= 0:
-        raise ValueError("risk.daily_max_loss_usd must be > 0 (kill switch must be configured)")
+    if cfg.risk.daily_max_loss_pct <= 0 and cfg.risk.daily_max_loss_usd <= 0:
+        raise ValueError("Set at least one of risk.daily_max_loss_pct / daily_max_loss_usd > 0")
+    if cfg.spot.long_lookback_minutes < cfg.spot.short_lookback_minutes:
+        raise ValueError("spot.long_lookback_minutes must be >= short_lookback_minutes")
+    if cfg.strategy.stop_loss_pct < 0:
+        raise ValueError("strategy.stop_loss_pct must be >= 0")
+    if cfg.strategy.inverted_total_threshold < 0:
+        raise ValueError("strategy.inverted_total_threshold must be >= 0")
 
     return cfg
