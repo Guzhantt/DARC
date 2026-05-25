@@ -196,7 +196,9 @@ def run() -> int:
                 log.info("--once: completed one market, exiting.")
                 break
             market = None
-            time.sleep(2)
+            # Wait for Polymarket to list the next 15m market slug.
+            # Too short (2s) caused skipping a cycle; 10s is safe.
+            time.sleep(10)
             continue
 
         # 5. Decide.
