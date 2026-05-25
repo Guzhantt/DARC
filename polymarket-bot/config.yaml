@@ -50,7 +50,7 @@ strategy:
   # Per user strategy: buy extreme underdog (e.g. Up @ 4¢), wait for it to
   # rebound (Up rises to 10¢, Down drops to 81¢), then LOCK_SPREAD locks the
   # 4¢ + 81¢ = 85¢ cost basis vs. $1 settlement = $0.15 / pair profit.
-  scout_max_price: 0.30           # only buy "real" underdogs <=30c (was 0.49)
+  scout_max_price: 0.47           # buy underdog up to 47c (user: not just 4c extremes)
   scout_min_remaining_sec: 480    # 8 minutes
   scout_size_usd: 10.0
   # Momentum filter for SCOUT: aligned | counter | none.
