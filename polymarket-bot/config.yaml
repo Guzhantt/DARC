@@ -37,7 +37,7 @@ spot:
   symbol: "BTCUSDT"
   short_lookback_minutes: 2       # fast momentum window (1-3 min per spec)
   long_lookback_minutes: 5        # slow window for direction confirmation
-  alignment_threshold: 0.0035     # 0.35%: minimum |fast return| to count as "trending"
+  alignment_threshold: 0.0005     # 0.05%: tuned to current low-vol BTC regime (was 0.0035)
   rsi_period: 14
   volume_lookback_minutes: 20     # baseline for volume_ratio
 
@@ -47,7 +47,7 @@ strategy:
   endgame_tick_interval_sec: 10
 
   # Rule: scout entry (early window — first 4 min of market = remaining > 11 min)
-  scout_max_price: 0.47
+  scout_max_price: 0.49
   scout_min_remaining_sec: 660    # 11 minutes
   scout_size_usd: 10.0
 
