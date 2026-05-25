@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polymarket 交易机器人 控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif; }
+    .num { font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; }
+    .pulse-dot { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    pre.log { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+<div class="max-w-7xl mx-auto p-4 lg:p-6">
+
+  <header class="flex flex-wrap items-center justify-between gap-4 mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-slate-900">Polymarket 交易机器人 控制台</h1>
+      <p class="text-sm text-slate-500 mt-1">实时监控纸面交易状态、净值、决策和成交记录</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="status-badge" class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium bg-slate-200 text-slate-600">
+        <span class="w-2 h-2 rounded-full bg-slate-400"></span>
+        加载中...
+      </span>
+      <button id="btn-start" class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-lg shadow transition">启动</button>
+      <button id="btn-stop"  class="bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-lg shadow transition">停止</button>
+    </div>
+  </header>
+
+  <div id="toast" class="hidden fixed top-4 right-4 z-50 bg-slate-900 text-white px-4 py-2 rounded-lg shadow-lg"></div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <div class="text-xs uppercase tracking-wider text-slate-500 mb-2">当前市场</div>
+      <div id="market-slug" class="text-sm font-semibold text-slate-900 truncate mb-3">—</div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="text-xs text-slate-500">YES 价</div>
+          <div id="market-yes" class="text-2xl font-bold num text-emerald-600">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">NO 价</div>
+          <div id="market-no" class="text-2xl font-bold num text-rose-600">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">总和 (YES+NO)</div>
+          <div id="market-total" class="text-lg font-semibold num">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">剩余时间</div>
+          <div id="market-remaining" class="text-lg font-semibold num">—</div>
+        </div>
+      </div>
+      <div class="mt-3 text-xs text-slate-500">本 tick 决策</div>
+      <div id="decision" class="text-sm font-mono mt-1 text-slate-700 truncate">—</div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <div class="text-xs uppercase tracking-wider text-slate-500 mb-2">持仓 / 净值</div>
+      <div class="flex items-baseline gap-2 mb-3">
+        <div id="equity-now" class="text-3xl font-bold num">—</div>
+        <div id="equity-change" class="text-sm font-medium num text-slate-400">—</div>
+      </div>
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <div>
+          <div class="text-xs text-slate-500">现金</div>
+          <div id="pos-cash" class="font-semibold num">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">YES 股数</div>
+          <div id="pos-yes" class="font-semibold num text-emerald-700">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">NO 股数</div>
+          <div id="pos-no" class="font-semibold num text-rose-700">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">净仓位（YES-NO 股）</div>
+          <div id="pos-net" class="font-semibold num">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <div class="text-xs uppercase tracking-wider text-slate-500 mb-2">现货 (BTCUSDT)</div>
+      <div class="flex items-baseline gap-2 mb-3">
+        <div id="spot-last" class="text-2xl font-bold num">—</div>
+        <div id="spot-rsi-pill" class="text-xs font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-700">RSI: —</div>
+      </div>
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <div>
+          <div class="text-xs text-slate-500">2 分钟变化</div>
+          <div id="spot-short" class="font-semibold num">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">5 分钟变化</div>
+          <div id="spot-long" class="font-semibold num">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">量比</div>
+          <div id="spot-vol" class="font-semibold num">—</div>
+        </div>
+        <div>
+          <div class="text-xs text-slate-500">动量分数</div>
+          <div id="spot-mscore" class="font-semibold num" title="(2m收益率) × (1-总和)">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-4">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <h2 class="font-semibold text-slate-900">净值曲线</h2>
+        <p class="text-xs text-slate-500">最近 300 个 tick（每 30 秒一个，最后 4 分钟每 10 秒一个）</p>
+      </div>
+      <div class="text-xs text-slate-500">
+        <span id="equity-min" class="num">—</span> 至 <span id="equity-max" class="num">—</span>
+      </div>
+    </div>
+    <div class="h-64">
+      <canvas id="equity-chart"></canvas>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <h2 class="font-semibold text-slate-900 mb-3">最近成交</h2>
+      <div class="overflow-auto max-h-72">
+        <table class="w-full text-xs">
+          <thead class="text-slate-500 sticky top-0 bg-white">
+            <tr class="border-b border-slate-200">
+              <th class="text-left py-2 px-2">时间</th>
+              <th class="text-left py-2 px-2">动作</th>
+              <th class="text-left py-2 px-2">边</th>
+              <th class="text-right py-2 px-2">股数</th>
+              <th class="text-right py-2 px-2">价格</th>
+              <th class="text-right py-2 px-2">名义</th>
+              <th class="text-left py-2 px-2">原因</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body">
+            <tr><td class="py-4 text-center text-slate-400" colspan="7">尚无成交</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <h2 class="font-semibold text-slate-900 mb-3">最近 500 个 tick 的决策分布</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="h-56">
+          <canvas id="decisions-chart"></canvas>
+        </div>
+        <div id="decisions-list" class="text-xs space-y-1.5 max-h-56 overflow-auto">
+          <div class="text-slate-400">加载中...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-4">
+    <h2 class="font-semibold text-slate-900 mb-3">最近 30 个 tick 的判断</h2>
+    <div class="overflow-auto max-h-80">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 sticky top-0 bg-white">
+          <tr class="border-b border-slate-200">
+            <th class="text-left py-2 px-2">时间</th>
+            <th class="text-right py-2 px-2">YES</th>
+            <th class="text-right py-2 px-2">NO</th>
+            <th class="text-right py-2 px-2">剩余</th>
+            <th class="text-right py-2 px-2">2m</th>
+            <th class="text-right py-2 px-2">RSI</th>
+            <th class="text-left py-2 px-2">决策</th>
+          </tr>
+        </thead>
+        <tbody id="ticks-body">
+          <tr><td class="py-4 text-center text-slate-400" colspan="7">尚无 tick</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <details class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+    <summary class="font-semibold text-slate-900 cursor-pointer select-none">查看 Bot 日志（最后 200 行）</summary>
+    <pre id="bot-log" class="log mt-3 text-xs bg-slate-900 text-slate-100 rounded-lg p-3 max-h-96 overflow-auto whitespace-pre-wrap"></pre>
+  </details>
+
+  <footer class="text-center text-xs text-slate-400 mt-6 mb-2">
+    数据每 3 秒自动刷新 · 仅纸面交易，不动真钱 · 完整说明见 README.md
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = {
+  usd:  (v) => v == null ? "—" : "$" + v.toFixed(2),
+  num4: (v) => v == null ? "—" : v.toFixed(4),
+  shares: (v) => v == null ? "—" : v.toFixed(3),
+  remaining: (sec) => {
+    if (sec == null || !isFinite(sec)) return "—";
+    if (sec <= 0) return "已结束";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}m ${s.toString().padStart(2,'0')}s`;
+  },
+  signedPct: (v, el) => {
+    if (v == null) { el.textContent = "—"; return; }
+    el.textContent = (v >= 0 ? "+" : "") + (v * 100).toFixed(3) + "%";
+    el.classList.remove("text-emerald-700","text-rose-700","text-slate-700");
+    el.classList.add(v > 0 ? "text-emerald-700" : v < 0 ? "text-rose-700" : "text-slate-700");
+  },
+  shortTime: (iso) => iso ? iso.slice(11, 19) : "—",
+};
+
+function showToast(msg, ok = true) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = `fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow-lg text-white ${ok ? 'bg-emerald-600' : 'bg-rose-600'}`;
+  t.classList.remove("hidden");
+  setTimeout(() => t.classList.add("hidden"), 2500);
+}
+
+async function postJSON(url) {
+  const r = await fetch(url, { method: "POST" });
+  return r.json();
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+const equityCtx = $("equity-chart").getContext("2d");
+const equityChart = new Chart(equityCtx, {
+  type: "line",
+  data: { labels: [], datasets: [{
+    label: "净值 ($)", data: [],
+    borderColor: "#0d9488",
+    backgroundColor: "rgba(13,148,136,0.1)",
+    borderWidth: 2, pointRadius: 0, fill: true, tension: 0.25,
+  }]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { maxTicksLimit: 8, color: "#64748b" }, grid: { color: "#f1f5f9" } },
+      y: { ticks: { color: "#64748b" }, grid: { color: "#f1f5f9" } },
+    },
+  },
+});
+
+const decisionsCtx = $("decisions-chart").getContext("2d");
+const PALETTE = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#6366f1","#84cc16","#06b6d4","#facc15","#a855f7","#22c55e"];
+const decisionsChart = new Chart(decisionsCtx, {
+  type: "doughnut",
+  data: { labels: [], datasets: [{ data: [], backgroundColor: PALETTE, borderWidth: 0 }] },
+  options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+});
+
+let lastEquity = null;
+
+function updateBadge(running) {
+  const b = $("status-badge");
+  if (running) {
+    b.className = "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium bg-emerald-100 text-emerald-700";
+    b.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot"></span>运行中';
+    $("btn-start").disabled = true;
+    $("btn-stop").disabled = false;
+  } else {
+    b.className = "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium bg-slate-200 text-slate-600";
+    b.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span>已停止';
+    $("btn-start").disabled = false;
+    $("btn-stop").disabled = true;
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const s = await getJSON("/api/status");
+    updateBadge(s.bot.running);
+    if (s.market) {
+      $("market-slug").textContent = s.market.slug || "—";
+      $("market-yes").textContent = fmt.num4(s.market.yes_price);
+      $("market-no").textContent = fmt.num4(s.market.no_price);
+      $("market-total").textContent = fmt.num4(s.market.total);
+      $("market-remaining").textContent = fmt.remaining(s.market.remaining_sec);
+    }
+    $("decision").textContent = s.decision || "—";
+    if (s.position) {
+      $("equity-now").textContent = fmt.usd(s.position.equity);
+      if (lastEquity != null && s.position.equity !== lastEquity) {
+        const diff = s.position.equity - lastEquity;
+        const el = $("equity-change");
+        el.textContent = (diff >= 0 ? "+" : "") + diff.toFixed(2);
+        el.className = `text-sm font-medium num ${diff >= 0 ? 'text-emerald-600' : 'text-rose-600'}`;
+      }
+      lastEquity = s.position.equity;
+      $("pos-cash").textContent = fmt.usd(s.position.cash);
+      $("pos-yes").textContent = fmt.shares(s.position.yes_shares);
+      $("pos-no").textContent = fmt.shares(s.position.no_shares);
+      const net = s.position.yes_shares - s.position.no_shares;
+      $("pos-net").textContent = (net >= 0 ? "+" : "") + net.toFixed(2);
+    }
+    if (s.spot) {
+      $("spot-last").textContent = "$" + s.spot.last.toFixed(2);
+      fmt.signedPct(s.spot.short_return, $("spot-short"));
+      fmt.signedPct(s.spot.long_return, $("spot-long"));
+      $("spot-vol").textContent = s.spot.volume_ratio.toFixed(2) + "x";
+      $("spot-mscore").textContent = (s.spot.momentum_score >= 0 ? "+" : "") + s.spot.momentum_score.toFixed(5);
+      const rsiPill = $("spot-rsi-pill");
+      rsiPill.textContent = "RSI: " + s.spot.rsi.toFixed(0);
+      rsiPill.className = "text-xs font-medium px-2 py-0.5 rounded " +
+        (s.spot.rsi >= 70 ? "bg-rose-100 text-rose-700" :
+         s.spot.rsi <= 30 ? "bg-emerald-100 text-emerald-700" :
+         "bg-slate-100 text-slate-700");
+    }
+  } catch (e) { console.error("status fetch failed", e); }
+}
+
+async function refreshEquity() {
+  try {
+    const r = await getJSON("/api/equity");
+    if (!r.points || r.points.length === 0) return;
+    const labels = r.points.map(p => fmt.shortTime(p.t));
+    const data = r.points.map(p => p.equity);
+    equityChart.data.labels = labels;
+    equityChart.data.datasets[0].data = data;
+    equityChart.update("none");
+    $("equity-min").textContent = fmt.usd(Math.min(...data));
+    $("equity-max").textContent = fmt.usd(Math.max(...data));
+  } catch (e) { console.error(e); }
+}
+
+async function refreshTrades() {
+  try {
+    const r = await getJSON("/api/trades");
+    const tbody = $("trades-body");
+    if (!r.trades || r.trades.length === 0) {
+      tbody.innerHTML = '<tr><td class="py-4 text-center text-slate-400" colspan="7">尚无成交</td></tr>';
+      return;
+    }
+    tbody.innerHTML = r.trades.map(t => {
+      const isBuy = t.action === "BUY";
+      const actClass = isBuy ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700";
+      const sideClass = t.side === "YES" ? "text-emerald-700" : "text-rose-700";
+      const reason = (t.reason || "").replace(/"/g,"&quot;");
+      return `<tr class="border-b border-slate-100">
+        <td class="py-1.5 px-2 num">${fmt.shortTime(t.timestamp_utc)}</td>
+        <td class="py-1.5 px-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-semibold ${actClass}">${t.action}</span></td>
+        <td class="py-1.5 px-2 font-semibold ${sideClass}">${t.side}</td>
+        <td class="py-1.5 px-2 text-right num">${parseFloat(t.shares).toFixed(2)}</td>
+        <td class="py-1.5 px-2 text-right num">${parseFloat(t.fill_price).toFixed(4)}</td>
+        <td class="py-1.5 px-2 text-right num">$${parseFloat(t.notional_usd).toFixed(2)}</td>
+        <td class="py-1.5 px-2 text-slate-500 truncate max-w-[200px]" title="${reason}">${reason}</td>
+      </tr>`;
+    }).join("");
+  } catch (e) { console.error(e); }
+}
+
+async function refreshTicks() {
+  try {
+    const r = await getJSON("/api/ticks");
+    const tbody = $("ticks-body");
+    if (!r.ticks || r.ticks.length === 0) {
+      tbody.innerHTML = '<tr><td class="py-4 text-center text-slate-400" colspan="7">尚无 tick</td></tr>';
+      return;
+    }
+    tbody.innerHTML = r.ticks.map(t => {
+      const dec = t.decision || "";
+      const isAction = ["SCOUT","LOCK_SPREAD","ENDGAME_HEDGE","STOP_LOSS","INVERTED"].some(k => dec.startsWith(k));
+      const decClass = isAction ? "text-emerald-700 font-semibold" : dec.startsWith("BLOCKED") ? "text-rose-700" : "text-slate-500";
+      const shortRet = parseFloat(t.spot_short_return || 0);
+      const shortStr = (shortRet >= 0 ? "+" : "") + (shortRet * 100).toFixed(3) + "%";
+      return `<tr class="border-b border-slate-100">
+        <td class="py-1.5 px-2 num">${fmt.shortTime(t.timestamp_utc)}</td>
+        <td class="py-1.5 px-2 text-right num text-emerald-700">${parseFloat(t.yes_price).toFixed(4)}</td>
+        <td class="py-1.5 px-2 text-right num text-rose-700">${parseFloat(t.no_price).toFixed(4)}</td>
+        <td class="py-1.5 px-2 text-right num">${fmt.remaining(parseFloat(t.remaining_sec))}</td>
+        <td class="py-1.5 px-2 text-right num">${shortStr}</td>
+        <td class="py-1.5 px-2 text-right num">${parseFloat(t.spot_rsi || 50).toFixed(0)}</td>
+        <td class="py-1.5 px-2 ${decClass} truncate max-w-[280px]" title="${dec}">${dec}</td>
+      </tr>`;
+    }).join("");
+  } catch (e) { console.error(e); }
+}
+
+async function refreshDecisions() {
+  try {
+    const r = await getJSON("/api/decisions");
+    if (!r.counts) return;
+    const top = r.counts.slice(0, 10);
+    decisionsChart.data.labels = top.map(c => c.name);
+    decisionsChart.data.datasets[0].data = top.map(c => c.count);
+    decisionsChart.update("none");
+    const total = r.total || 1;
+    $("decisions-list").innerHTML = r.counts.map((c, i) => {
+      const pct = (c.count / total * 100).toFixed(1);
+      const color = PALETTE[i % PALETTE.length];
+      return `<div class="flex items-center gap-2">
+        <span class="w-3 h-3 rounded-sm flex-shrink-0" style="background:${color}"></span>
+        <span class="flex-1 truncate font-mono text-[11px]" title="${c.name}">${c.name}</span>
+        <span class="num text-slate-700 font-medium">${c.count}</span>
+        <span class="num text-slate-400 w-12 text-right">${pct}%</span>
+      </div>`;
+    }).join("");
+  } catch (e) { console.error(e); }
+}
+
+async function refreshLog() {
+  try {
+    const r = await getJSON("/api/log");
+    const el = $("bot-log");
+    if (!r.lines) return;
+    if (r.lines.length === 0) { el.textContent = "(尚无日志)"; return; }
+    el.textContent = r.lines.join("\n");
+    el.scrollTop = el.scrollHeight;
+  } catch (e) { console.error(e); }
+}
+
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshEquity(), refreshTrades(), refreshTicks(), refreshDecisions(), refreshLog()]);
+}
+
+$("btn-start").addEventListener("click", async () => {
+  $("btn-start").disabled = true;
+  const r = await postJSON("/api/bot/start");
+  showToast(r.message, r.ok);
+  setTimeout(refreshAll, 800);
+});
+$("btn-stop").addEventListener("click", async () => {
+  if (!confirm("确定要停止 bot 吗？已有持仓会留在内存中（重启后归零）。")) return;
+  $("btn-stop").disabled = true;
+  const r = await postJSON("/api/bot/stop");
+  showToast(r.message, r.ok);
+  setTimeout(refreshAll, 800);
+});
+
+refreshAll();
+setInterval(refreshAll, 3000);
+</script>
+</body>
+</html>

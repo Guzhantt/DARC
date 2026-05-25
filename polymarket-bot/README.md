@@ -1,23 +1,27 @@
 # polymarket-bot
 
-A short-cycle YES/NO trading bot for [Polymarket](https://polymarket.com/) recurring 15-minute up/down markets, driven by orderbook spread + spot momentum confirmation, with execution-quality guards, risk guardrails, and full CSV journaling.
+A short-cycle YES/NO trading bot for [Polymarket](https://polymarket.com/) recurring 15-minute up/down markets, with a **Chinese-language web dashboard** for one-click control and live monitoring.
 
 > **Status:** paper-trading only by default. Live execution is a stub — wiring it up requires a Polygon wallet, USDC, and the `py-clob-client` SDK. See "Going Live" below.
 
-## Beginner quick start (macOS)
+## Quickest start (web dashboard, recommended)
 
 ```bash
 cd polymarket-bot
-./run.sh                 # creates venv, installs deps, runs preflight + bot
+./run-web.sh
 ```
 
-If you only want to verify everything works without trading:
+That's it. Browser opens automatically to `http://localhost:8000`. Click 启动 to start the bot, watch the live equity chart, market prices, decision distribution and trade log. Click 停止 to stop. **Everything is in Chinese, no terminal commands needed after the initial launch.**
+
+## Command-line alternative
+
+If you prefer terminal-only:
 
 ```bash
-./run.sh --check         # preflight only, exit
+./run.sh                 # start bot in foreground
+./run.sh --check         # only run preflight, exit
+python tools/analyze.py  # post-session performance report
 ```
-
-That's it. Stop with `Ctrl+C`. After a session, open `logs/trades.csv` and `logs/ticks.csv` in Numbers/Excel to see exactly what happened.
 
 ## Strategy summary (5 rules, in priority order)
 
@@ -136,11 +140,18 @@ Start with $10-20 of paper-equivalent size before scaling.
 
 ```
 polymarket-bot/
-|- run.sh                    one-command launcher
+|- run.sh                    one-command CLI launcher
+|- run-web.sh                web dashboard launcher (NEW)
 |- config.yaml               all knobs, edit this
 |- requirements.txt
 |- .env.example              live mode credentials template
 |- logs/                     auto-created - trades.csv + ticks.csv
+|- tools/
+|  `- analyze.py             post-session CLI performance report
+|- web/                      Chinese web dashboard (NEW)
+|  |- app.py                 Flask server + bot subprocess manager
+|  `- templates/
+|     `- dashboard.html      single-page UI (Tailwind + Chart.js, all in Chinese)
 `- src/
    |- main.py                entry point + adaptive loop + session gate
    |- config.py              YAML loader
