@@ -192,6 +192,21 @@ def run() -> int:
         if snap.remaining_sec <= 0:
             log.info("Market %s ended. equity=$%.2f %s", market.slug, equity, state.summary())
             markets_traded += 1
+            # Reset position for next market. Each 15m market is independent —
+            # settlement pays out automatically, so we start fresh.
+            state.yes.shares = 0.0
+            state.yes.avg_price = 0.0
+            state.yes.cost_usd = 0.0
+            state.yes.entry_spot_price = 0.0
+            state.no.shares = 0.0
+            state.no.avg_price = 0.0
+            state.no.cost_usd = 0.0
+            state.no.entry_spot_price = 0.0
+            # Simulate settlement payout: winning side pays $1/share.
+            # In paper mode we approximate by resetting cash to current equity
+            # (which already includes the mark-to-market value of shares).
+            state.cash_usd = equity
+            log.info("Position reset for next market. cash=$%.2f", state.cash_usd)
             if args.once:
                 log.info("--once: completed one market, exiting.")
                 break
