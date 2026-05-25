@@ -66,7 +66,7 @@ strategy:
   min_profit_after_fees: 0.025
 
   # Rule: endgame (last 4 minutes)
-  endgame_remaining_sec: 240
+  endgame_remaining_sec: 180
   endgame_hedge_ratio: 0.5
   unbalanced_threshold_usd: 1.0
 

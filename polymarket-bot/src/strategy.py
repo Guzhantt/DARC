@@ -273,34 +273,39 @@ def _maybe_lock_spread(
 def _endgame_hedge(
     cfg: Config, snap: MarketSnapshot, momentum: MomentumReading, state: PortfolioState,
 ) -> Tuple[Optional[Intent], str]:
+    """Last 3-4 minutes: if we only have ONE side (scout succeeded but
+    lock_spread never fired), and spot confirms the market is going against
+    us (single-sided trend), SELL the losing position to cut losses.
+
+    This is the ONLY scenario where we sell. If we have BOTH sides locked,
+    we're already guaranteed profit → just hold to settlement.
+    """
     s = cfg.strategy
-    if not state.is_unbalanced(s.unbalanced_threshold_usd):
+
+    # If we have both sides (locked pair), hold to settlement — guaranteed profit.
+    if state.yes.is_open and state.no.is_open:
+        return None, "HOLD_endgame_locked_pair"
+
+    # If no position at all, nothing to do.
+    if not state.has_position():
         return None, "HOLD_endgame_balanced"
 
-    net = state.net_share_exposure()
-    long_side: Side = "YES" if net > 0 else "NO"
+    # We have only ONE side — check if we should cut losses.
+    long_side: Side = "YES" if state.yes.is_open else "NO"
+    pos = state.get(long_side)
+
+    # Only sell if spot momentum DISAGREES with our side (confirms single-sided trend against us).
     if momentum_aligns(momentum, long_side, cfg.spot.alignment_threshold, require_multi_tf=False):
         return None, f"HOLD_endgame_spot_confirms({long_side})"
 
-    hedge_side: Side = opposite(long_side)
-    hedge_shares = abs(net) * s.endgame_hedge_ratio
-    hedge_price = midpoint_for(snap, hedge_side)
-    book = book_for(snap, hedge_side)
-    quality_reason = _book_quality_block(book, hedge_price, cfg)
-    if quality_reason:
-        log.warning("Endgame hedge proceeding despite book quality issue: %s", quality_reason)
-
-    hedge_fill = (
-        book.best_price if book and book.has_quotes
-        else min(hedge_price + cfg.fees.slippage_estimate, 0.999)
-    )
-    target_usd = hedge_shares * hedge_fill
+    # Sell the losing leg to cut losses.
+    sell_price = midpoint_for(snap, long_side)
     return Intent(
-        action="BUY", side=hedge_side, size=target_usd, midpoint=hedge_price,
+        action="SELL", side=long_side, size=pos.shares,
+        midpoint=sell_price,
         reason=(
-            f"endgame hedge: net {long_side} {abs(net):.2f} sh, "
-            f"spot disagrees (short={momentum.short_return:+.4f}), "
-            f"hedge {hedge_shares:.2f} {hedge_side}"
+            f"endgame stop: {long_side} unhedged, spot against us "
+            f"(short={momentum.short_return:+.4f}), sell {pos.shares:.2f} sh @ {sell_price:.3f}"
         ),
     ), "ENDGAME_HEDGE"
 
