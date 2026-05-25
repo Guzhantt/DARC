@@ -40,15 +40,15 @@
       <div id="market-slug" class="text-sm font-semibold text-slate-900 truncate mb-3">—</div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <div class="text-xs text-slate-500">YES 价</div>
+          <div class="text-xs text-slate-500"><span class="lbl-yes">YES</span> 价</div>
           <div id="market-yes" class="text-2xl font-bold num text-emerald-600">—</div>
         </div>
         <div>
-          <div class="text-xs text-slate-500">NO 价</div>
+          <div class="text-xs text-slate-500"><span class="lbl-no">NO</span> 价</div>
           <div id="market-no" class="text-2xl font-bold num text-rose-600">—</div>
         </div>
         <div>
-          <div class="text-xs text-slate-500">总和 (YES+NO)</div>
+          <div class="text-xs text-slate-500">总和 (<span class="lbl-yes">YES</span>+<span class="lbl-no">NO</span>)</div>
           <div id="market-total" class="text-lg font-semibold num">—</div>
         </div>
         <div>
@@ -72,15 +72,15 @@
           <div id="pos-cash" class="font-semibold num">—</div>
         </div>
         <div>
-          <div class="text-xs text-slate-500">YES 股数</div>
+          <div class="text-xs text-slate-500"><span class="lbl-yes">YES</span> 股数</div>
           <div id="pos-yes" class="font-semibold num text-emerald-700">—</div>
         </div>
         <div>
-          <div class="text-xs text-slate-500">NO 股数</div>
+          <div class="text-xs text-slate-500"><span class="lbl-no">NO</span> 股数</div>
           <div id="pos-no" class="font-semibold num text-rose-700">—</div>
         </div>
         <div>
-          <div class="text-xs text-slate-500">净仓位（YES-NO 股）</div>
+          <div class="text-xs text-slate-500">净仓位（<span class="lbl-yes">YES</span>-<span class="lbl-no">NO</span> 股）</div>
           <div id="pos-net" class="font-semibold num">—</div>
         </div>
       </div>
@@ -171,8 +171,8 @@
         <thead class="text-slate-500 sticky top-0 bg-white">
           <tr class="border-b border-slate-200">
             <th class="text-left py-2 px-2">时间</th>
-            <th class="text-right py-2 px-2">YES</th>
-            <th class="text-right py-2 px-2">NO</th>
+            <th class="text-right py-2 px-2"><span class="lbl-yes">YES</span></th>
+            <th class="text-right py-2 px-2"><span class="lbl-no">NO</span></th>
             <th class="text-right py-2 px-2">剩余</th>
             <th class="text-right py-2 px-2">2m</th>
             <th class="text-right py-2 px-2">RSI</th>
@@ -264,6 +264,14 @@ const decisionsChart = new Chart(decisionsCtx, {
 });
 
 let lastEquity = null;
+let currentLabels = { yes: "YES", no: "NO" };
+
+function applyLabels(labels) {
+  if (!labels) return;
+  currentLabels = labels;
+  document.querySelectorAll(".lbl-yes").forEach(el => { el.textContent = labels.yes; });
+  document.querySelectorAll(".lbl-no").forEach(el => { el.textContent = labels.no; });
+}
 
 function updateBadge(running) {
   const b = $("status-badge");
@@ -284,6 +292,7 @@ async function refreshStatus() {
   try {
     const s = await getJSON("/api/status");
     updateBadge(s.bot.running);
+    applyLabels(s.labels);
     if (s.market) {
       $("market-slug").textContent = s.market.slug || "—";
       $("market-yes").textContent = fmt.num4(s.market.yes_price);
@@ -349,11 +358,12 @@ async function refreshTrades() {
       const isBuy = t.action === "BUY";
       const actClass = isBuy ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700";
       const sideClass = t.side === "YES" ? "text-emerald-700" : "text-rose-700";
+      const sideLabel = t.side === "YES" ? currentLabels.yes : currentLabels.no;
       const reason = (t.reason || "").replace(/"/g,"&quot;");
       return `<tr class="border-b border-slate-100">
         <td class="py-1.5 px-2 num">${fmt.shortTime(t.timestamp_utc)}</td>
         <td class="py-1.5 px-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-semibold ${actClass}">${t.action}</span></td>
-        <td class="py-1.5 px-2 font-semibold ${sideClass}">${t.side}</td>
+        <td class="py-1.5 px-2 font-semibold ${sideClass}">${sideLabel}</td>
         <td class="py-1.5 px-2 text-right num">${parseFloat(t.shares).toFixed(2)}</td>
         <td class="py-1.5 px-2 text-right num">${parseFloat(t.fill_price).toFixed(4)}</td>
         <td class="py-1.5 px-2 text-right num">$${parseFloat(t.notional_usd).toFixed(2)}</td>

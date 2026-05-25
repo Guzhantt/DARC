@@ -30,6 +30,14 @@ from typing import Any, Deque, Dict, List, Optional
 
 from flask import Flask, jsonify, render_template
 
+# Import the polymarket client for live label resolution. Done inside a
+# try/except so the dashboard can still start even if src/ has a syntax
+# error — the user can fix the bot code while the UI keeps running.
+try:
+    from src.polymarket_client import PolymarketClient
+except Exception:  # pragma: no cover
+    PolymarketClient = None  # type: ignore[misc,assignment]
+
 # polymarket-bot project root (one above this web/ folder).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -194,6 +202,28 @@ app = Flask(__name__, template_folder="templates")
 bot = BotManager(PROJECT_ROOT)
 
 
+# Cache market display labels (e.g. "Up"/"Down") per slug so we can show them
+# in the UI without an API call on every status refresh. Recurring 15m slugs
+# rotate every 15 minutes, so the cache stays small.
+_label_client: Optional[Any] = PolymarketClient(timeout_sec=5.0) if PolymarketClient else None
+_label_cache: Dict[str, tuple[str, str]] = {}
+
+
+def get_market_labels(slug: str) -> tuple[str, str]:
+    if not slug or _label_client is None:
+        return ("YES", "NO")
+    if slug in _label_cache:
+        return _label_cache[slug]
+    try:
+        info = _label_client.get_market_by_slug(slug)
+        labels = (info.yes_label or "YES", info.no_label or "NO")
+    except Exception as e:
+        log.debug("Label lookup failed for %s: %s", slug, e)
+        labels = ("YES", "NO")
+    _label_cache[slug] = labels
+    return labels
+
+
 @app.route("/")
 def index():
     return render_template("dashboard.html")
@@ -209,6 +239,7 @@ def api_status():
         "position": None,
         "decision": tick.get("decision") if tick else "",
         "tick_time": tick.get("timestamp_utc") if tick else None,
+        "labels": {"yes": "YES", "no": "NO"},
     }
     if tick:
         try:
@@ -216,8 +247,11 @@ def api_status():
             no = float(tick.get("no_price") or 0)
         except ValueError:
             yes = no = 0.0
+        slug = tick.get("market_slug", "")
+        yes_label, no_label = get_market_labels(slug)
+        payload["labels"] = {"yes": yes_label, "no": no_label}
         payload["market"] = {
-            "slug": tick.get("market_slug", ""),
+            "slug": slug,
             "yes_price": yes,
             "no_price": no,
             "total": round(yes + no, 4),

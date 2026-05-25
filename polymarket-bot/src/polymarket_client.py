@@ -37,6 +37,11 @@ class MarketInfo:
     end_date_iso: Optional[str]
     closed: bool
     active: bool
+    # Display labels from Polymarket — e.g. "Up" / "Down" for the BTC up/down
+    # series, "Yes" / "No" for typical event markets. Internally we still call
+    # them YES/NO (yes_token_id/no_token_id) but UIs should prefer these.
+    yes_label: str = "YES"
+    no_label: str = "NO"
 
 
 @dataclass
@@ -261,6 +266,8 @@ def _market_from_gamma(m: dict) -> MarketInfo:
         end_date_iso=m.get("endDate") or m.get("end_date_iso"),
         closed=bool(m.get("closed", False)),
         active=bool(m.get("active", True)),
+        yes_label=str(outcomes[yes_idx]).strip() or "YES",
+        no_label=str(outcomes[no_idx]).strip() or "NO",
     )
 
 
