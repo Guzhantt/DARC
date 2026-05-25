@@ -70,14 +70,14 @@ strategy:
   endgame_hedge_ratio: 0.5
   unbalanced_threshold_usd: 1.0
 
-  # Rule: stop-loss (anytime). 0 disables.
-  stop_loss_pct: 0.015            # close losing leg if it's down >1.5%
+  # Rule: stop-loss (anytime). 0 = DISABLED.
+  # User strategy is buy-and-hold-to-settlement, never sell mid-market.
+  stop_loss_pct: 0.0              # DISABLED — no mid-market selling
 
-  # Rule: inverted-book early exit (anytime). 0 disables.
-  # Fires when YES+NO total exceeds the threshold AND spot has reversed
-  # against our larger position by more than inverted_spot_reversal_pct.
-  inverted_total_threshold: 1.02
-  inverted_spot_reversal_pct: 0.003   # 0.3% spot reversal vs entry
+  # Rule: inverted-book early exit (anytime). 0 = DISABLED.
+  # Same reason: strategy holds both legs to settlement, no early exit.
+  inverted_total_threshold: 0.0
+  inverted_spot_reversal_pct: 0.0
 
 # ---------- Fees & slippage assumed for paper fills ----------
 fees:
