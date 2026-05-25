@@ -48,6 +48,13 @@ class StrategyCfg:
     scout_max_price: float
     scout_min_remaining_sec: int
     scout_size_usd: float
+    # Momentum filter mode for SCOUT entry:
+    #   "aligned" — cheap side must agree with current spot momentum (original)
+    #   "counter" — only enter when spot momentum is AGAINST cheap side
+    #               (overreaction signal, mean-reversion bias)
+    #   "none"    — no momentum filter, enter purely based on price (recommended
+    #               for the "buy extreme underdog and wait for rebound" play)
+    scout_momentum_mode: str
     arb_total_threshold: float
     arb_min_remaining_sec: int
     min_profit_after_fees: float
@@ -173,5 +180,9 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         raise ValueError("strategy.stop_loss_pct must be >= 0")
     if cfg.strategy.inverted_total_threshold < 0:
         raise ValueError("strategy.inverted_total_threshold must be >= 0")
+    if cfg.strategy.scout_momentum_mode not in ("aligned", "counter", "none"):
+        raise ValueError(
+            "strategy.scout_momentum_mode must be 'aligned', 'counter', or 'none'"
+        )
 
     return cfg

@@ -46,10 +46,19 @@ strategy:
   tick_interval_sec: 30
   endgame_tick_interval_sec: 10
 
-  # Rule: scout entry (early window — first 7 min of market = remaining > 8 min)
-  scout_max_price: 0.49
-  scout_min_remaining_sec: 480    # 8 minutes (was 660 / 11 min — too narrow when bot starts mid-market)
+  # Rule: scout entry — buy the small-probability (cheap) side as first leg.
+  # Per user strategy: buy extreme underdog (e.g. Up @ 4¢), wait for it to
+  # rebound (Up rises to 10¢, Down drops to 81¢), then LOCK_SPREAD locks the
+  # 4¢ + 81¢ = 85¢ cost basis vs. $1 settlement = $0.15 / pair profit.
+  scout_max_price: 0.30           # only buy "real" underdogs <=30c (was 0.49)
+  scout_min_remaining_sec: 480    # 8 minutes
   scout_size_usd: 10.0
+  # Momentum filter for SCOUT: aligned | counter | none.
+  # "none" matches user's "buy any cheap underdog" intent — recommended.
+  # "aligned" requires momentum to agree with cheap side (almost never fires
+  #   because underdog is cheap precisely BECAUSE momentum is against it).
+  # "counter" requires momentum to disagree with cheap side (overreaction signal).
+  scout_momentum_mode: "none"
 
   # Rule: lock spread / complement (middle window — remaining > 4 min)
   arb_total_threshold: 0.97

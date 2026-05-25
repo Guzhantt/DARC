@@ -223,7 +223,15 @@ def run() -> int:
         for intent in intents:
             try:
                 if intent.action == "BUY":
-                    capped_usd = risk.cap_trade_size(intent.size)
+                    # Risk cap applies only to OPENING trades (SCOUT). LOCK_SPREAD
+                    # and ENDGAME_HEDGE are balancing trades that REDUCE directional
+                    # risk by completing a near-arbitrage pair — capping them at
+                    # max_single_trade_usd would leave us with a partially hedged
+                    # position that's actually riskier than a full hedge.
+                    if decision in ("LOCK_SPREAD", "ENDGAME_HEDGE"):
+                        capped_usd = intent.size
+                    else:
+                        capped_usd = risk.cap_trade_size(intent.size)
                     log.info("INTENT BUY  %s $%.2f @ ~%.4f | %s",
                              intent.side, capped_usd, intent.midpoint, intent.reason)
                     book = snap.yes_book if intent.side == "YES" else snap.no_book

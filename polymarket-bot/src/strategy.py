@@ -153,6 +153,16 @@ def _maybe_scout(
     cfg: Config, snap: MarketSnapshot, momentum: MomentumReading,
     state: PortfolioState, low: Side, low_price: float,
 ) -> Tuple[Optional[Intent], str]:
+    """Buy the cheap (small-probability) side as the first leg of the
+    'underdog scout + lock spread' play.
+
+    Momentum gate is configurable via strategy.scout_momentum_mode:
+      - aligned: cheap side must agree with momentum (original; near-impossible
+                 since underdog is cheap precisely because momentum is against it)
+      - counter: enter only when momentum is AGAINST cheap side (overreaction)
+      - none:    enter purely on price + time + book quality (matches the user's
+                 'buy underdog whenever it's cheap, wait for rebound' strategy)
+    """
     s = cfg.strategy
     if snap.remaining_sec <= s.scout_min_remaining_sec:
         return None, f"HOLD_scout_too_late({snap.remaining_sec:.0f}s)"
@@ -160,11 +170,22 @@ def _maybe_scout(
         return None, f"HOLD_scout_price_high({low}={low_price:.3f})"
     if state.has_position(low):
         return None, f"HOLD_scout_already_in({low})"
-    if not momentum_aligns(momentum, low, cfg.spot.alignment_threshold, require_multi_tf=True):
-        return None, (
-            f"HOLD_scout_momentum(short={momentum.short_return:+.4f},"
-            f"long={momentum.long_return:+.4f})"
-        )
+
+    mode = s.scout_momentum_mode
+    if mode == "aligned":
+        if not momentum_aligns(momentum, low, cfg.spot.alignment_threshold, require_multi_tf=True):
+            return None, (
+                f"HOLD_scout_momentum_against(short={momentum.short_return:+.4f},"
+                f"long={momentum.long_return:+.4f})"
+            )
+    elif mode == "counter":
+        opp = opposite(low)
+        if not momentum_aligns(momentum, opp, cfg.spot.alignment_threshold, require_multi_tf=False):
+            return None, (
+                f"HOLD_scout_no_overreaction(short={momentum.short_return:+.4f})"
+            )
+    # mode == "none": skip momentum filter entirely
+
     book = book_for(snap, low)
     quality_reason = _book_quality_block(book, low_price, cfg)
     if quality_reason:
@@ -173,7 +194,7 @@ def _maybe_scout(
     return Intent(
         action="BUY", side=low, size=s.scout_size_usd, midpoint=low_price,
         reason=(
-            f"scout: cheap={low}@{low_price:.3f} "
+            f"scout({mode}): cheap={low}@{low_price:.3f} "
             f"short={momentum.short_return:+.4f} long={momentum.long_return:+.4f} "
             f"rsi={momentum.rsi:.0f} vol={momentum.volume_ratio:.2f}x"
         ),
@@ -183,9 +204,25 @@ def _maybe_scout(
 def _maybe_lock_spread(
     cfg: Config, snap: MarketSnapshot, state: PortfolioState, total: float,
 ) -> Tuple[Optional[Intent], str]:
+    """Lock the spread when COST BASIS (held_avg + current complement price)
+    makes a +EV pair.
+
+    The previous `current_total > arb_total_threshold` gate was wrong: it
+    blocked exactly the cases the user wants.
+
+    Concrete example from user spec:
+      held YES @ 0.04, current YES=0.10 NO=0.85, current_total = 0.95
+      cost basis = 0.04 + 0.85 = 0.89 → edge = 0.11 → +EV
+      old code: would also have fired (total < 0.97)
+
+      held YES @ 0.04, current YES=0.15 NO=0.85, current_total = 1.00
+      cost basis = 0.04 + 0.85 = 0.89 → edge = 0.11 → +EV
+      old code: WOULD HAVE BLOCKED (total > 0.97)  ← bug
+
+    What matters is what we already paid for the first leg, not the current
+    midpoint sum.
+    """
     s = cfg.strategy
-    if total > s.arb_total_threshold:
-        return None, f"HOLD_arb_no_spread(total={total:.4f})"
     if snap.remaining_sec <= s.arb_min_remaining_sec:
         return None, f"HOLD_arb_too_late({snap.remaining_sec:.0f}s)"
 
@@ -214,7 +251,10 @@ def _maybe_lock_spread(
     fees_per_share = (held_avg + complement_fill) * cfg.fees.per_side_fee_rate
     edge_per_pair = 1.0 - (held_avg + complement_fill + fees_per_share)
     if edge_per_pair < s.min_profit_after_fees:
-        return None, f"HOLD_arb_edge_thin({edge_per_pair:.4f})"
+        return None, (
+            f"HOLD_arb_edge_thin(edge={edge_per_pair:.4f},"
+            f"avg={held_avg:.3f},comp={complement_fill:.3f})"
+        )
 
     needed_shares = max(0.0, held_shares - state.get(complement).shares)
     if needed_shares <= 1e-6:
@@ -224,8 +264,8 @@ def _maybe_lock_spread(
     return Intent(
         action="BUY", side=complement, size=target_usd, midpoint=complement_price,
         reason=(
-            f"lock spread: total={total:.4f} edge={edge_per_pair:.4f} "
-            f"buy {needed_shares:.2f} {complement} to balance"
+            f"lock spread: held_avg={held_avg:.3f} comp={complement_fill:.3f} "
+            f"edge={edge_per_pair:.4f} buy {needed_shares:.2f} {complement}"
         ),
     ), "LOCK_SPREAD"
 
@@ -275,6 +315,9 @@ def _book_quality_block(book: Optional[BookSide], midpoint: float, cfg: Config) 
         return f"spread_wide({book.spread:.3f})"
     if cfg.execution_quality.min_depth_usd > 0 and book.depth_within_1pct_usd < cfg.execution_quality.min_depth_usd:
         return f"depth_thin(${book.depth_within_1pct_usd:.0f})"
-    if midpoint > 0 and abs(book.best_price - midpoint) / midpoint > 0.10:
+    # Sanity: best_price drifted too far from midpoint = stale/corrupted feed.
+    # Use ABSOLUTE delta (not percentage) because at extreme prices like 4¢,
+    # a normal 1¢ ask-vs-mid gap looks like 25% in relative terms.
+    if abs(book.best_price - midpoint) > 0.05:
         return f"price_drift({book.best_price:.3f}_vs_mid{midpoint:.3f})"
     return ""
